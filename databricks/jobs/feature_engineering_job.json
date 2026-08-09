@@ -1,0 +1,89 @@
+{
+    "name": "phase3-feature-engineering-pipeline",
+    "tags": {
+        "phase": "3",
+        "type": "feature-store",
+        "environment": "dev"
+    },
+    "schedule": {
+        "quartz_cron_expression": "0 0 2 * * ?",
+        "timezone_id": "UTC",
+        "pause_status": "UNPAUSED"
+    },
+    "tasks": [
+        {
+            "task_key": "compute_baselines",
+            "description": "Daily 90-day customer behavioral baselines",
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/features/compute_behavioral_baselines"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.master": "local[*]" },
+                "autotermination_minutes": 20
+            }
+        },
+        {
+            "task_key": "compute_merchant_risk",
+            "description": "Daily 30-day merchant risk scores",
+            "depends_on": [{ "task_key": "compute_baselines" }],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/features/compute_merchant_risk"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.master": "local[*]" },
+                "autotermination_minutes": 20
+            }
+        },
+        {
+            "task_key": "compute_graph_features",
+            "description": "Hourly GraphFrames batch job",
+            "depends_on": [{ "task_key": "compute_merchant_risk" }],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/features/compute_graph_metrics"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.master": "local[*]" },
+                "autotermination_minutes": 20
+            }
+        },
+        {
+            "task_key": "validate_feature_consistency",
+            "description": "Point-in-time join & leakage validation",
+            "depends_on": [{ "task_key": "compute_graph_features" }],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/validation/test_feature_consistency"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.master": "local[*]" },
+                "autotermination_minutes": 20
+            }
+        },
+        {
+            "task_key": "run_freshness_monitor",
+            "description": "Feature freshness & staleness check",
+            "depends_on": [{ "task_key": "validate_feature_consistency" }],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/monitoring/feature_freshness_monitor"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.master": "local[*]" },
+                "autotermination_minutes": 20
+            }
+        }
+    ]
+}

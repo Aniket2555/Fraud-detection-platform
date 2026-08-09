@@ -1,0 +1,33 @@
+name: ML Pipeline CI
+
+on:
+  push:
+    paths:
+      - 'ml/**'
+  pull_request:
+    paths:
+      - 'ml/**'
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install ruff pytest numpy pandas scikit-learn
+          pip install -e . --no-deps
+
+      - name: Lint ML code
+        run: |
+          ruff check ml/ --select E,W,F,I || echo "Ruff completed"
+
+      - name: Run ML unit tests
+        run: |
+          pytest ml/tests/ -v --tb=short

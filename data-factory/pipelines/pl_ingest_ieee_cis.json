@@ -1,0 +1,97 @@
+{
+    "name": "pl_ingest_ieee_cis",
+    "properties": {
+        "description": "Ingests IEEE-CIS dataset CSVs from staging/blob landing into ADLS Gen2 raw/ieee-cis/",
+        "activities": [
+            {
+                "name": "Copy_Train_Transactions",
+                "type": "Copy",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.02:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "DelimitedTextSource",
+                        "storeSettings": {
+                            "type": "AzureBlobStorageReadSettings",
+                            "recursive": false
+                        },
+                        "formatSettings": {
+                            "type": "DelimitedTextReadSettings"
+                        }
+                    },
+                    "sink": {
+                        "type": "DelimitedTextSink",
+                        "storeSettings": {
+                            "type": "AzureBlobFSWriteSettings"
+                        },
+                        "formatSettings": {
+                            "type": "DelimitedTextWriteSettings",
+                            "quoteAllText": true
+                        }
+                    },
+                    "enableStaging": false
+                },
+                "inputs": [
+                    {
+                        "referenceName": "ds_source_ieee_cis_csv",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "fileName": "train_transaction.csv"
+                        }
+                    }
+                ],
+                "outputs": [
+                    {
+                        "referenceName": "ds_adls_raw_ieee_cis",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "fileName": "train_transaction.csv"
+                        }
+                    }
+                ]
+            },
+            {
+                "name": "Copy_Train_Identity",
+                "type": "Copy",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.01:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30
+                },
+                "typeProperties": {
+                    "source": {
+                        "type": "DelimitedTextSource",
+                        "storeSettings": { "type": "AzureBlobStorageReadSettings" }
+                    },
+                    "sink": {
+                        "type": "DelimitedTextSink",
+                        "storeSettings": { "type": "AzureBlobFSWriteSettings" }
+                    }
+                },
+                "inputs": [
+                    {
+                        "referenceName": "ds_source_ieee_cis_csv",
+                        "type": "DatasetReference",
+                        "parameters": { "fileName": "train_identity.csv" }
+                    }
+                ],
+                "outputs": [
+                    {
+                        "referenceName": "ds_adls_raw_ieee_cis",
+                        "type": "DatasetReference",
+                        "parameters": { "fileName": "train_identity.csv" }
+                    }
+                ]
+            }
+        ],
+        "annotations": ["phase1", "ieee-cis", "ingestion"]
+    }
+}

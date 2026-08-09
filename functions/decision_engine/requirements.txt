@@ -1,0 +1,17 @@
+# ============================================================
+# Decision Engine Azure Function — requirements.txt
+# Function: functions/decision_engine/function_app.py
+# Runtime: Azure Functions v4, Python 3.11
+# ============================================================
+
+# --- Azure Functions host ---
+azure-functions>=1.19.0
+
+# --- Service Bus (persistent topic sender) ---
+azure-servicebus>=7.12.0
+
+# --- App Configuration (threshold cache) ---
+azure-appconfiguration>=1.5.0
+
+# --- Managed Identity (credential chain for Key Vault + App Config) ---
+azure-identity>=1.16.0

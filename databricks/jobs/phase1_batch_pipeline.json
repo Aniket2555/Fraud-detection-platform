@@ -1,0 +1,93 @@
+{
+    "name": "phase1_batch_pipeline",
+    "tasks": [
+        {
+            "task_key": "ingest_transactions",
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/bronze/ingest_ieee_cis_transactions"
+            },
+            "job_cluster_key": "batch_cluster"
+        },
+        {
+            "task_key": "ingest_identity",
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/bronze/ingest_ieee_cis_identity"
+            },
+            "job_cluster_key": "batch_cluster"
+        },
+        {
+            "task_key": "quality_gate",
+            "depends_on": [
+                {"task_key": "ingest_transactions"},
+                {"task_key": "ingest_identity"}
+            ],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/quality/run_quality_gate"
+            },
+            "job_cluster_key": "batch_cluster"
+        },
+        {
+            "task_key": "transform_to_silver",
+            "depends_on": [{"task_key": "quality_gate"}],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/silver/transform_ieee_cis_to_silver"
+            },
+            "job_cluster_key": "batch_cluster"
+        },
+        {
+            "task_key": "validate_silver",
+            "depends_on": [{"task_key": "transform_to_silver"}],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/silver/validate_silver"
+            },
+            "job_cluster_key": "batch_cluster"
+        },
+        {
+            "task_key": "gold_daily_summary",
+            "depends_on": [{"task_key": "validate_silver"}],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/gold/daily_fraud_summary"
+            },
+            "job_cluster_key": "batch_cluster"
+        },
+        {
+            "task_key": "train_baseline_model",
+            "depends_on": [{"task_key": "validate_silver"}],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/ml/training/train_xgboost_baseline"
+            },
+            "job_cluster_key": "ml_cluster"
+        },
+        {
+            "task_key": "end_to_end_validation",
+            "depends_on": [
+                {"task_key": "gold_daily_summary"},
+                {"task_key": "train_baseline_model"}
+            ],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/validation/phase1_end_to_end_validation"
+            },
+            "job_cluster_key": "batch_cluster"
+        }
+    ],
+    "job_clusters": [
+        {
+            "job_cluster_key": "batch_cluster",
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.master": "local[*]" }
+            }
+        },
+        {
+            "job_cluster_key": "ml_cluster",
+            "new_cluster": {
+                "spark_version": "14.3.x-cpu-ml-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.master": "local[*]" }
+            }
+        }
+    ]
+}

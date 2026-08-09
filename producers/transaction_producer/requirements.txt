@@ -1,0 +1,23 @@
+# ============================================================
+# Transaction Producer — requirements.txt
+# Component: producers/transaction_producer/
+# Python 3.11 | Local dev & CI
+# ============================================================
+
+# --- Azure Event Hubs SDK (async producer with batching) ---
+azure-eventhub>=5.11.7
+azure-eventhub-checkpointstoreblob-aio>=1.2.0  # Checkpoint store for consumer groups
+
+# --- Schema validation ---
+jsonschema>=4.22.0
+
+# --- Data loading ---
+pandas>=2.1.0
+numpy>=1.26.0
+
+# --- Utilities ---
+python-dotenv>=1.0.0        # Load .env files for local dev
+
+# --- Testing ---
+pytest>=8.1.0
+pytest-asyncio>=0.23.0      # Async test support for eventhub producer

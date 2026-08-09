@@ -1,0 +1,40 @@
+# ============================================================
+# requirements-dev.txt — Developer Tooling Only
+# Install with: pip install -r requirements-dev.txt
+#
+# This is a LIGHTWEIGHT install for:
+#   - IDE / editor tooling (type checking, formatting)
+#   - Notebook-based exploratory analysis
+#   - Documentation generation
+#
+# It does NOT include ML frameworks, Azure SDKs, or PySpark.
+# Use requirements.txt for the full local dev environment.
+# ============================================================
+
+# ── Code Quality ──────────────────────────────────────────────
+black>=24.4.0                     # Auto-formatter (line length 99)
+isort>=5.13.0                     # Import sorting
+flake8>=7.0.0                     # Linting (PEP8)
+flake8-bugbear>=24.2.6            # Extra flake8 rules (common bugs)
+mypy>=1.9.0                       # Static type checking
+
+# ── Pre-commit Hooks ──────────────────────────────────────────
+pre-commit>=3.7.0
+
+# ── Security ──────────────────────────────────────────────────
+bandit>=1.7.8                     # Python SAST
+pip-audit>=2.7.0                  # Dependency CVE scanning
+detect-secrets>=1.5.0             # Secret leak pre-commit hook
+
+# ── Notebook Support ──────────────────────────────────────────
+jupyterlab>=4.2.0
+ipykernel>=6.29.0
+ipywidgets>=8.1.0
+
+# ── Documentation ─────────────────────────────────────────────
+mkdocs>=1.6.0
+mkdocs-material>=9.5.0
+
+# ── HTTP Testing ──────────────────────────────────────────────
+httpx>=0.27.0                     # Async HTTP client for endpoint smoke tests
+requests>=2.31.0

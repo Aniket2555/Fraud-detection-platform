@@ -1,0 +1,71 @@
+{
+    "name": "mlops_daily_drift_and_retrain",
+    "tasks": [
+        {
+            "task_key": "ingest_chargeback_feedback",
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/mlops/ingest_chargeback_feedback"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.databricks.cluster.profile": "singleNode" },
+                "custom_tags": { "ResourceClass": "SingleNode" },
+                "autotermination_minutes": 20
+            }
+        },
+        {
+            "task_key": "track_model_kpis",
+            "depends_on": [{ "task_key": "ingest_chargeback_feedback" }],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/mlops/track_model_performance_kpis"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.databricks.cluster.profile": "singleNode" },
+                "custom_tags": { "ResourceClass": "SingleNode" },
+                "autotermination_minutes": 20
+            }
+        },
+        {
+            "task_key": "run_daily_drift_check",
+            "depends_on": [{ "task_key": "track_model_kpis" }],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/mlops/run_daily_drift_check"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.databricks.cluster.profile": "singleNode" },
+                "custom_tags": { "ResourceClass": "SingleNode" },
+                "autotermination_minutes": 20
+            }
+        },
+        {
+            "task_key": "shadow_scoring_batch",
+            "depends_on": [{ "task_key": "run_daily_drift_check" }],
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/mlops/shadow_scoring_batch"
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": { "spark.databricks.cluster.profile": "singleNode" },
+                "custom_tags": { "ResourceClass": "SingleNode" },
+                "autotermination_minutes": 20
+            }
+        }
+    ],
+    "schedule": {
+        "quartz_cron_expression": "0 0 6 * * ?",
+        "timezone_id": "Asia/Kolkata",
+        "pause_status": "UNPAUSED"
+    },
+    "max_concurrent_runs": 1,
+    "tags": { "phase": "6", "pipeline": "mlops" }
+}

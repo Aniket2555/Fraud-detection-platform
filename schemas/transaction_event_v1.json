@@ -1,0 +1,118 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://fraud-detection.dev/schemas/transaction_event_v1.json",
+  "title": "TransactionEvent",
+  "description": "Canonical transaction event for the fraud detection pipeline. Schema version 1.0.",
+  "type": "object",
+  "required": [
+    "transaction_id",
+    "schema_version",
+    "event_time",
+    "customer_id",
+    "card_id",
+    "amount",
+    "merchant_id",
+    "payment_method",
+    "channel",
+    "source"
+  ],
+  "properties": {
+    "transaction_id": {
+      "type": "string",
+      "description": "Globally unique transaction identifier (UUID v4)"
+    },
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0"],
+      "description": "Event schema version"
+    },
+    "event_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Transaction timestamp in ISO 8601 UTC"
+    },
+    "ingestion_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Producer-side ingestion timestamp"
+    },
+    "customer_id": {
+      "type": "string",
+      "description": "Anonymized customer identifier"
+    },
+    "card_id": {
+      "type": "string",
+      "description": "Anonymized card identifier — used as partition key"
+    },
+    "amount": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Transaction amount"
+    },
+    "currency": {
+      "type": "string",
+      "default": "USD",
+      "description": "ISO 4217 currency code"
+    },
+    "merchant_id": {
+      "type": "string",
+      "description": "Anonymized merchant identifier"
+    },
+    "merchant_category": {
+      "type": "string",
+      "description": "Merchant category code / name"
+    },
+    "payment_method": {
+      "type": "string",
+      "enum": ["credit_card", "debit_card", "prepaid", "wallet", "upi", "bank_transfer"],
+      "description": "Payment instrument type"
+    },
+    "device_id": {
+      "type": ["string", "null"],
+      "description": "Anonymized device fingerprint"
+    },
+    "ip_address": {
+      "type": ["string", "null"],
+      "description": "Hashed IP address"
+    },
+    "latitude": {
+      "type": ["number", "null"],
+      "minimum": -90,
+      "maximum": 90
+    },
+    "longitude": {
+      "type": ["number", "null"],
+      "minimum": -180,
+      "maximum": 180
+    },
+    "billing_country": {
+      "type": "string"
+    },
+    "shipping_country": {
+      "type": ["string", "null"]
+    },
+    "channel": {
+      "type": "string",
+      "enum": ["mobile_app", "web", "pos", "atm", "moto", "recurring"]
+    },
+    "is_recurring": {
+      "type": "boolean",
+      "default": false
+    },
+    "session_id": {
+      "type": ["string", "null"]
+    },
+    "is_fraud": {
+      "type": ["boolean", "null"],
+      "default": null
+    },
+    "is_synthetic": {
+      "type": "boolean",
+      "default": false
+    },
+    "source": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

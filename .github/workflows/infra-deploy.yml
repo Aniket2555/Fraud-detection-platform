@@ -1,0 +1,90 @@
+name: Infrastructure Deployment
+
+on:
+  push:
+    branches: [develop, staging, main]
+    paths:
+      - 'infrastructure/**'
+  pull_request:
+    branches: [develop, staging, main]
+    paths:
+      - 'infrastructure/**'
+
+permissions:
+  id-token: write    # Required for Azure OIDC login
+  contents: read
+
+env:
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  determine-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+    steps:
+      - id: set-env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+          fi
+
+  validate:
+    runs-on: ubuntu-latest
+    needs: determine-environment
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (Client Secret / OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate Bicep
+        run: |
+          az bicep build --file infrastructure/main.bicep
+          echo "Bicep validation passed"
+
+      - name: What-If Deployment
+        run: |
+          az deployment sub what-if \
+            --location centralindia \
+            --template-file infrastructure/main.bicep \
+            --parameters infrastructure/modules/parameters/${{ needs.determine-environment.outputs.environment }}.parameters.json
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [determine-environment, validate]
+    if: github.event_name == 'push'
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (Client Secret / OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy Infrastructure
+        run: |
+          az deployment sub create \
+            --location centralindia \
+            --template-file infrastructure/main.bicep \
+            --parameters infrastructure/modules/parameters/${{ needs.determine-environment.outputs.environment }}.parameters.json \
+            --name "fraud-infra-$(date +%Y%m%d%H%M%S)"
+
+      - name: Verify Deployment
+        run: |
+          ENV=${{ needs.determine-environment.outputs.environment }}
+          echo "Verifying resources in rg-fraud-detection-${ENV}..."
+          az resource list \
+            --resource-group "rg-fraud-detection-${ENV}" \
+            --output table

@@ -1,0 +1,9 @@
+{
+    "name": "ls_adls_gen2",
+    "properties": {
+        "type": "AzureBlobFS",
+        "typeProperties": {
+            "url": "https://stfraudlakedev.dfs.core.windows.net"
+        }
+    }
+}

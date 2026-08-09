@@ -1,0 +1,21 @@
+{
+    "dataset": "IEEE-CIS Fraud Detection",
+    "files": {
+        "train_transaction.csv": {
+            "expected_rows": 590540,
+            "expected_columns": 394
+        },
+        "train_identity.csv": {
+            "expected_rows": 144233,
+            "expected_columns": 41
+        },
+        "test_transaction.csv": {
+            "expected_rows": 506691,
+            "expected_columns": 393
+        },
+        "test_identity.csv": {
+            "expected_rows": 141907,
+            "expected_columns": 41
+        }
+    }
+}

@@ -1,0 +1,7 @@
+experiment_name: "fraud-detection-baseline"
+silver_table: "fraud_detection_dev.silver.transactions"
+train_ratio: 0.70
+val_ratio: 0.15
+test_ratio: 0.15
+n_optuna_trials: 30
+model_name: "fraud-xgboost-baseline"

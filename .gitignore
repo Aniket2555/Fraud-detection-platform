@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment Variables & Secrets
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+secrets.json
+
+# Bicep / Azure / Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+main.bicep.binary
+
+# Databricks & PySpark
+.databricks/
+dbfs/
+*.db
+metastore_db/
+derby.log
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.target/
+.mypy_cache/
+.ruff_cache/
+
+# Local Spark / MLflow run artifacts (created when running pytest/training
+# scripts locally outside Databricks or Azure ML — e.g. `pytest databricks/tests/`
+# spins up a local SparkSession, and ml/training/*.py + ml/pipelines/*.py call
+# mlflow.start_run() without a remote tracking URI)
+spark-warehouse/
+mlruns/
+mlartifacts/
+
+# Local dataset downloads (producers/transaction_producer/config.py defaults
+# to data/creditcard.csv; IEEE-CIS CSVs are similarly large and external —
+# never meant to be committed)
+data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

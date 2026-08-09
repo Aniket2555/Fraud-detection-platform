@@ -1,0 +1,315 @@
+# Fraud Detection Pipeline Architecture — Refinement Review
+
+Your architecture document is **production-caliber** — it demonstrates deep domain understanding of fraud detection, makes sharp technology choices, and avoids the common traps (random splits, training/serving skew, naïve accuracy metrics). The refinements below are targeted improvements, not a rewrite.
+
+## Summary of Findings
+
+| Category | Count | Impact |
+|---|---|---|
+| Critical gaps (could cause production incidents) | 3 | 🔴 High |
+| Design improvements (correctness / resilience) | 5 | 🟡 Medium |
+| Minor polish (clarity / completeness) | 4 | 🟢 Low |
+
+---
+
+## 🔴 Critical Gaps
+
+### 1. Missing Circuit Breaker & Fallback Strategy (Section 8)
+
+> [!CAUTION]
+> The architecture has no defined behavior when the ML endpoint, Redis, or downstream services are **unavailable**. In a real payment flow, "no response" is worse than a wrong response — it blocks the transaction indefinitely.
+
+**Add to Section 8.1/8.3:**
+
+```markdown
+### 8.4 Fallback & Degradation Strategy
+
+| Failure mode | Fallback behavior |
+|---|---|
+| Online feature store (Redis) unreachable | Score using **transaction-level features only** (stateless subset), with a conservative score bias (+0.15 to final score) to compensate for missing behavioral signals |
+| ML endpoint timeout (>100ms) or 5xx | Fall back to a **rules-only engine** (velocity + amount thresholds from a pre-cached rule set in the Azure Function's memory), returning a "degraded" flag so downstream case management treats it as lower confidence |
+| Service Bus unavailable | Azure Function writes the event to a **local retry queue** (Azure Storage Queue as fallback); a separate reconciliation job replays once Service Bus recovers |
+| Full scoring path down | **Default-approve** with a hard cap (e.g., transactions <₹5,000 only), flag all others for deferred review — this is a business decision that must be agreed with fraud-ops, not a technical default |
+
+- Implement **circuit breakers** (e.g., Polly in the Azure Function, or Azure API Management circuit-breaker policy) on the Redis and ML endpoint calls with configurable trip thresholds.
+- Every degraded decision must carry a `scoring_mode` field (`full | partial_features | rules_only | default_approve`) so downstream analytics can segment model performance by scoring quality.
+```
+
+---
+
+### 2. Missing Back-Pressure & Consumer Lag Handling (Sections 3–4)
+
+> [!CAUTION]
+> The Event Hubs → Bronze streaming path has no documented behavior for **consumer lag** or **back-pressure**. If the Databricks streaming job falls behind (cluster scaling, checkpoint corruption, job restart), you'll either lose events past the retention window or accumulate unbounded lag.
+
+**Add to Section 4.1:**
+
+```markdown
+#### Back-pressure & lag management
+
+- **Event Hubs retention:** Set to **7 days** (maximum for Premium tier) rather than the default 1 day — provides recovery headroom when the streaming job is down for maintenance or incident recovery.
+- **Consumer lag alerting:** Monitor `enqueuedTime - processingTime` per partition via Databricks metrics → Azure Monitor; alert when lag exceeds **2× the watermark (20 min)** — this gives you a signal *before* windows start closing with incomplete data.
+- **Adaptive micro-batch sizing:** Use `maxEventsPerTrigger` to cap per-batch volume during catch-up, preventing OOM during large lag recovery:
+  ```python
+  .option("maxEventsPerTrigger", 100000)
+  ```
+- **Event Hubs Capture as safety net:** Already noted — but explicitly: during extended outages, Capture's Avro files in ADLS become the **recovery path** via Auto Loader backfill, not just an archive.
+```
+
+---
+
+### 3. No Dead-Letter Handling for the Decision Path (Section 8.3)
+
+> [!WARNING]
+> Section 4.1 correctly handles DLQ for data ingestion, but the **decision path** (Function → Service Bus → Logic App/SQL/Audit) has no documented dead-letter or retry strategy. A failed Service Bus message means a fraud case is silently lost.
+
+**Add to Section 8.3:**
+
+```markdown
+#### Decision-path resilience
+
+- **Service Bus dead-letter queue:** Enable DLQ on each subscription with `maxDeliveryCount = 5` and exponential retry. A dedicated **Azure Function** monitors the DLQ, logs to Application Insights, and raises a P1 alert — a lost fraud case is never acceptable.
+- **Idempotency:** The Azure SQL case-management insert must be idempotent on `transaction_id` (MERGE/upsert, not blind INSERT) since Service Bus guarantees at-least-once, not exactly-once.
+- **Poison message handling:** Logic App runs that fail after retries should park the case in a `review_failed` status in Azure SQL and alert the fraud-ops on-call, rather than silently retrying forever.
+```
+
+---
+
+## 🟡 Design Improvements
+
+### 4. Event Schema Enhancements (Section 3.1)
+
+The canonical schema is solid but missing a few fields that are important for production fraud scoring and auditability:
+
+```diff
+  {
+    "transaction_id": "uuid",
+    "event_time": "2026-07-24T10:21:45.123Z",
+    "ingestion_time": "2026-07-24T10:21:45.410Z",
++   "schema_version": "1.0",
+    "customer_id": "c_512",
+    "card_id": "card_9931",
+    "amount": 2500.00,
+    "currency": "INR",
+    "merchant_id": "m_4471",
+    "merchant_category": "ecommerce",
+    "payment_method": "credit_card",
+    "device_id": "d_abc123",
+    "ip_address": "132.24.x.x",
+    "latitude": 18.54,
+    "longitude": 73.82,
+    "channel": "mobile_app",
++   "billing_country": "IN",
++   "shipping_country": "IN",
++   "is_recurring": false,
++   "session_id": "sess_xyz789",
+    "is_synthetic": false,
+    "source": "credit_card_txn_stream"
+  }
+```
+
+**Rationale:**
+- `schema_version` — enables safe schema evolution without breaking consumers; the Schema Registry enforces format, but application-level versioning enables logic branching.
+- `billing_country` / `shipping_country` — cross-border mismatch is one of the strongest fraud signals for e-commerce; currently you'd have to reverse-geocode from lat/long, which is lossy and slow.
+- `is_recurring` — recurring payments have fundamentally different fraud patterns (lower risk for same-merchant repeat, higher risk if suddenly changed); treating them identically hurts model precision.
+- `session_id` — links transactions to broader browsing/authentication sessions for session-level anomaly features (multiple cards tried in one session = card testing).
+
+---
+
+### 5. Watermark & Late-Arrival Handling Refinement (Section 5)
+
+The 10-minute watermark is reasonable but the document should acknowledge the trade-off explicitly:
+
+```markdown
+#### Watermark trade-off decision
+
+- **10 minutes** is chosen based on an assumed upper bound of producer/network jitter.
+  Measure actual late-arrival distribution during Phase 2 (streaming path validation) 
+  and adjust — too tight drops legitimate late events from windows, too loose 
+  increases state size and delays window output.
+- For **geo-velocity features** specifically (impossible travel detection), 
+  consider a longer watermark (30 min) on a separate stream fork, since these 
+  features tolerate higher latency but are very sensitive to dropped events 
+  (a missing intermediate transaction makes a legitimate journey look impossible).
+- Emit a **late-arrival metric** (`late_events_dropped_count` per partition per minute)
+  to Azure Monitor — a spike here directly degrades feature quality and should 
+  trigger investigation.
+```
+
+---
+
+### 6. Graph Feature Computation Needs More Specificity (Section 5.1)
+
+The graph features row in the table says "computed periodically (e.g., every 15 min)" but doesn't address the fact that graph computation at scale is **expensive** and the 15-min cadence may be unrealistic:
+
+```markdown
+#### Graph feature architecture (refined)
+
+Two-tier approach:
+1. **Pre-computed graph metrics** (degree centrality, PageRank, community ID per 
+   entity) — computed via GraphFrames on a **dedicated Databricks job cluster** 
+   every **1 hour** (not 15 min — community detection and centrality on even a 
+   modest entity graph takes 10–20 min), materialized to the offline/online 
+   feature store as slowly-changing features.
+2. **Real-time local graph queries** — for inference-time features like 
+   "how many distinct customers have used this device in the last 24h," use 
+   **Azure Cosmos DB (Gremlin API)** with a 1-hop traversal (bounded query cost). 
+   The entity graph in Cosmos is updated by a streaming Databricks job that 
+   writes edges as transactions flow through Silver.
+
+This avoids the trap of trying to do full graph recomputation at streaming speed 
+while still giving the model fresh relational signals.
+```
+
+---
+
+### 7. Autoencoder Retraining Cadence & Data Selection (Section 7)
+
+> [!IMPORTANT]
+> The document says the autoencoder is "retrained periodically on recent legitimate traffic" but doesn't specify cadence or the critical question: **how do you know a transaction is "legitimate" for retraining purposes?**
+
+```markdown
+#### Autoencoder & Isolation Forest retraining protocol
+
+- **Cadence:** Weekly retraining, triggered by the drift monitor or on schedule 
+  (whichever fires first). Not daily — the autoencoder's reconstruction threshold 
+  is sensitive to distribution shifts, and daily retraining risks chasing noise.
+- **"Legitimate" label for retraining:** Use transactions that were **approved by 
+  the decision engine AND not subsequently charged back within a 14-day lookback 
+  window**. This is inherently delayed information — the autoencoder always trains 
+  on data that is at least 14 days old, which is acceptable because it's learning 
+  the "normal" distribution, not chasing recent fraud patterns (that's the 
+  supervised model's job).
+- **Contamination guard:** Even with the chargeback filter, assume up to 0.1% of 
+  the "legitimate" training set is undetected fraud. Isolation Forest is robust to 
+  this; for the autoencoder, use a **trimmed reconstruction loss** (discard the 
+  top 1% of loss values during training) to prevent undetected fraud from 
+  inflating the learned normality boundary.
+```
+
+---
+
+### 8. Ensemble Weights Should Not Be Static (Section 7)
+
+The current ensemble formula `final_score = w1*P + w2*RE + w3*IS` uses fixed weights. In practice:
+
+```markdown
+#### Adaptive ensemble (refinement)
+
+Instead of fixed weights tuned once on a validation set, use a **stacking 
+meta-learner** (logistic regression or small gradient-boosted model) that takes 
+the three calibrated scores as input features and outputs the final fraud 
+probability:
+
+```python
+# Meta-learner training (offline, during retraining pipeline)
+meta_features = np.column_stack([
+    supervised_calibrated_probs,    # from XGBoost/LightGBM
+    ae_calibrated_scores,           # from Autoencoder
+    if_calibrated_scores,           # from Isolation Forest
+])
+meta_learner = LogisticRegression(class_weight='balanced')
+meta_learner.fit(meta_features, labels)
+```
+
+**Why:** As fraud patterns evolve, the relative informativeness of each model 
+shifts — a static blend can't adapt. The meta-learner is retrained alongside 
+the component models in the MLOps pipeline (Section 9), versioned in the model 
+registry as part of the ensemble artifact.
+
+The meta-learner also naturally captures **interaction effects** (e.g., "high 
+supervised score + low reconstruction error = likely false positive from the 
+supervised model") that a linear blend misses.
+```
+
+---
+
+## 🟢 Minor Polish
+
+### 9. Bronze Code Snippet — Missing `event_date` Derivation
+
+The Bronze ingestion code (Section 4.1) partitions by `event_date` but never derives it:
+
+```diff
+  parsed = (
+      raw_stream
+          .withColumn("body", col("body").cast("string"))
+          .withColumn("event", from_json(col("body"), txn_schema))
+          .select("event.*", "enqueuedTime", "partition")
+          .withColumn("_ingested_at", current_timestamp())
++         .withColumn("event_date", col("event_time").cast("date"))
+  )
+```
+
+---
+
+### 10. Decision Threshold Calibration (Section 8.3)
+
+The decision thresholds (0.10, 0.60, 0.90) are presented as fixed values. Add:
+
+```markdown
+> **Note:** These thresholds are initial values and must be tuned on historical 
+> data using cost-sensitive analysis:
+> - Cost of a false negative (missed fraud) ≈ average fraud loss amount
+> - Cost of a false positive (blocking legitimate) ≈ customer lifetime value 
+>   impact + support cost
+> - Cost of step-up (friction) ≈ conversion drop rate × average transaction value
+>
+> Thresholds should be stored as **configuration in Azure App Configuration** 
+> (not hardcoded), versioned, and adjustable by fraud-ops without redeployment. 
+> Threshold changes should be logged as audit events.
+```
+
+---
+
+### 11. Build Order — Add Phase 0 (Section 14)
+
+Insert a Phase 0 before the current Phase 1:
+
+```markdown
+0. **Environment & IaC foundation:** Provision the core Azure resources (Resource 
+   Group, ADLS Gen2, Databricks workspace, Key Vault, VNet) via Bicep/Terraform 
+   and set up the CI/CD pipeline skeleton. This avoids click-ops debt that 
+   compounds with every subsequent phase, and ensures dev/staging/prod parity 
+   from day one.
+```
+
+---
+
+### 12. Specify Databricks Runtime & Cluster Policy (Section 4)
+
+```markdown
+> **Databricks configuration:**
+> - Use **Databricks Runtime 14.x LTS or later** (LTS for stability in a 
+>   24/7 streaming job).
+> - Streaming jobs should run on a **dedicated job cluster** (not a shared 
+>   interactive cluster) with autoscaling between a min/max node range sized 
+>   to handle the burst throughput target (50k events/sec).
+> - Enable **Photon** for the Silver/Gold batch transformation jobs 
+>   (significant speedup on Delta MERGE operations).
+> - Use **Unity Catalog** as the metastore (not the legacy Hive metastore) 
+>   for consistent governance across Bronze/Silver/Gold.
+```
+
+---
+
+## Proposed Changes
+
+The refinements above should be **merged into** [fraud_detection_pipeline_architecture.md](file:///d:/Code%20File/Project-2-Real-time-fraudlent%20detection/fraud_detection_pipeline_architecture.md) as additions to their respective sections. No existing content needs to be deleted — these are additive improvements.
+
+### Change Summary by Section
+
+| Section | Change Type |
+|---|---|
+| §3.1 Event Schema | Add 4 fields + `schema_version` |
+| §4.1 Bronze | Add `event_date` derivation, back-pressure/lag management, Databricks runtime guidance |
+| §5 Feature Engineering | Refine watermark trade-off, late-arrival metrics, graph feature architecture |
+| §7 Hybrid Model | Add autoencoder retraining protocol, replace static blend with stacking meta-learner |
+| §8 Inference & Decision | Add §8.4 Fallback & Degradation Strategy, decision-path DLQ, threshold calibration note |
+| §14 Build Order | Add Phase 0 (IaC foundation) |
+
+## Verification Plan
+
+### Manual Verification
+- Review the refined document for technical accuracy and internal consistency
+- Ensure all cross-references between sections remain valid after additions

@@ -1,0 +1,12 @@
+# Infrastructure changes require platform team review
+infrastructure/    @platform-team
+
+# Data pipeline changes require data engineering review
+databricks/        @data-engineering-team
+data-factory/      @data-engineering-team
+
+# ML code requires data science review
+ml/                @data-science-team
+
+# CI/CD changes require platform team review
+.github/           @platform-team

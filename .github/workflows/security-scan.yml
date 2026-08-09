@@ -1,0 +1,105 @@
+name: Security & IaC Vulnerability Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  trufflehog-secret-scan:
+    name: Secret Leak Detection (TruffleHog)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog Scan
+        uses: trufflesecurity/trufflehog-actions-scan@v3.0.0
+        with:
+          extra_args: --only-verified
+
+  checkov-bicep-scan:
+    name: IaC Security Misconfiguration (Checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Run Checkov Bicep Scan
+        run: |
+          checkov -d ./infrastructure --framework bicep \
+            --skip-check CKV_AZURE_33,CKV_AZURE_35 \
+            --output cli --output junitxml --output-file-path console,results.xml
+
+      - name: Upload Checkov Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-results
+          path: results.xml
+
+  bandit-python-sast:
+    name: Python SAST (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Bandit
+        run: pip install bandit[toml]
+
+      - name: Run Bandit Security Analysis
+        run: |
+          bandit -r ./ml ./databricks ./functions ./scripts \
+            --severity-level medium \
+            --confidence-level medium \
+            -f json -o bandit-report.json || true
+          bandit -r ./ml ./databricks ./functions ./scripts \
+            --severity-level high \
+            --confidence-level high
+
+      - name: Upload Bandit Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-results
+          path: bandit-report.json
+
+  dependency-vulnerability-scan:
+    name: Dependency Vulnerability Scan (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit ML Dependencies
+        run: |
+          pip-audit -r ml/requirements.txt --desc on || true
+
+      - name: Audit Function Dependencies
+        run: |
+          pip-audit -r functions/decision_engine/requirements.txt --desc on || true

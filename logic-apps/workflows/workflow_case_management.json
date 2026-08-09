@@ -1,0 +1,64 @@
+{
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+        "When_a_message_arrives_in_CaseMgmt_subscription": {
+            "type": "ApiConnection",
+            "inputs": {
+                "host": {
+                    "connection": { "name": "@parameters('$connections')['servicebus']['connectionId']" }
+                },
+                "method": "get",
+                "path": "/@{encodeURIComponent('sb-topic-fraud-events')}/subscriptions/@{encodeURIComponent('sub-case-mgmt')}/messages/head"
+            },
+            "recurrence": { "frequency": "Minute", "interval": 1 }
+        }
+    },
+    "actions": {
+        "Parse_Message_JSON": {
+            "type": "ParseJson",
+            "inputs": {
+                "content": "@base64ToString(triggerBody()?['ContentData'])",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "transaction_id": { "type": "string" },
+                        "customer_id": { "type": "string" },
+                        "card_id": { "type": "string" },
+                        "amount": { "type": "number" },
+                        "currency": { "type": "string" },
+                        "fraud_prob": { "type": "number" },
+                        "scoring_mode": { "type": "string" },
+                        "action": { "type": "string" },
+                        "model_version": { "type": "string" },
+                        "shap_factors": { "type": "array" },
+                        "correlation_id": { "type": "string" }
+                    }
+                }
+            }
+        },
+        "Upsert_Case_Record": {
+            "type": "ApiConnection",
+            "inputs": {
+                "host": {
+                    "connection": { "name": "@parameters('$connections')['sql']['connectionId']" }
+                },
+                "method": "post",
+                "path": "/v2/datasets/@{encodeURIComponent('sql-fraud-dev')},@{encodeURIComponent('sqldb-fraud-cases-dev')}/procedures/@{encodeURIComponent('sp_upsert_fraud_case')}",
+                "body": {
+                    "transaction_id": "@body('Parse_Message_JSON')?['transaction_id']",
+                    "customer_id": "@body('Parse_Message_JSON')?['customer_id']",
+                    "card_id": "@body('Parse_Message_JSON')?['card_id']",
+                    "amount": "@body('Parse_Message_JSON')?['amount']",
+                    "currency": "@coalesce(body('Parse_Message_JSON')?['currency'], 'USD')",
+                    "fraud_probability": "@body('Parse_Message_JSON')?['fraud_prob']",
+                    "scoring_mode": "@coalesce(body('Parse_Message_JSON')?['scoring_mode'], 'full')",
+                    "decision_action": "@body('Parse_Message_JSON')?['action']",
+                    "model_version": "@body('Parse_Message_JSON')?['model_version']",
+                    "shap_top_features": "@string(coalesce(body('Parse_Message_JSON')?['shap_factors'], json('[]')))"
+                }
+            },
+            "runAfter": { "Parse_Message_JSON": ["Succeeded"] }
+        }
+    }
+}

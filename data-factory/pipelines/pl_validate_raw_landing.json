@@ -1,0 +1,93 @@
+{
+    "name": "pl_validate_raw_landing",
+    "properties": {
+        "description": "Validates landed raw files in ADLS Gen2 raw/ieee-cis/ against the expected_columns values in data-factory/checksums/ieee_cis_checksums.json (passed in as expectedTransactionColumns/expectedIdentityColumns). Previously this pipeline only fetched exists/size metadata and never compared it to anything, so it could never actually detect a bad or incomplete landing -- it now fails the pipeline run if a file is missing, empty, or has the wrong column count. NOTE: expected_rows in the checksums file is still not validated here -- ADF's GetMetadata activity cannot count CSV rows without a Data Flow or Lookup activity; row-count validation is a follow-up, not covered by this fix.",
+        "parameters": {
+            "expectedTransactionColumns": { "type": "int", "defaultValue": 394 },
+            "expectedIdentityColumns": { "type": "int", "defaultValue": 41 }
+        },
+        "activities": [
+            {
+                "name": "Get_Train_Transaction_Metadata",
+                "type": "GetMetadata",
+                "dependsOn": [],
+                "policy": { "timeout": "0.00:10:00", "retry": 0 },
+                "typeProperties": {
+                    "dataset": {
+                        "referenceName": "ds_adls_raw_ieee_cis",
+                        "type": "DatasetReference",
+                        "parameters": { "fileName": "train_transaction.csv" }
+                    },
+                    "fieldList": ["exists", "size", "columnCount"]
+                }
+            },
+            {
+                "name": "Get_Train_Identity_Metadata",
+                "type": "GetMetadata",
+                "dependsOn": [],
+                "policy": { "timeout": "0.00:10:00", "retry": 0 },
+                "typeProperties": {
+                    "dataset": {
+                        "referenceName": "ds_adls_raw_ieee_cis",
+                        "type": "DatasetReference",
+                        "parameters": { "fileName": "train_identity.csv" }
+                    },
+                    "fieldList": ["exists", "size", "columnCount"]
+                }
+            },
+            {
+                "name": "Validate_Train_Transaction",
+                "type": "IfCondition",
+                "dependsOn": [
+                    { "activity": "Get_Train_Transaction_Metadata", "dependencyConditions": ["Succeeded"] }
+                ],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@and(and(activity('Get_Train_Transaction_Metadata').output.exists, greater(activity('Get_Train_Transaction_Metadata').output.size, 0)), equals(activity('Get_Train_Transaction_Metadata').output.columnCount, pipeline().parameters.expectedTransactionColumns))",
+                        "type": "Expression"
+                    },
+                    "ifFalseActivities": [
+                        {
+                            "name": "Fail_Train_Transaction_Validation",
+                            "type": "Fail",
+                            "typeProperties": {
+                                "message": {
+                                    "value": "@concat('train_transaction.csv failed landing validation: exists=', string(activity('Get_Train_Transaction_Metadata').output.exists), ' size=', string(activity('Get_Train_Transaction_Metadata').output.size), ' columnCount=', string(activity('Get_Train_Transaction_Metadata').output.columnCount), ' expectedColumns=', string(pipeline().parameters.expectedTransactionColumns))",
+                                    "type": "Expression"
+                                },
+                                "errorCode": "RawLandingValidationFailed"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Validate_Train_Identity",
+                "type": "IfCondition",
+                "dependsOn": [
+                    { "activity": "Get_Train_Identity_Metadata", "dependencyConditions": ["Succeeded"] }
+                ],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@and(and(activity('Get_Train_Identity_Metadata').output.exists, greater(activity('Get_Train_Identity_Metadata').output.size, 0)), equals(activity('Get_Train_Identity_Metadata').output.columnCount, pipeline().parameters.expectedIdentityColumns))",
+                        "type": "Expression"
+                    },
+                    "ifFalseActivities": [
+                        {
+                            "name": "Fail_Train_Identity_Validation",
+                            "type": "Fail",
+                            "typeProperties": {
+                                "message": {
+                                    "value": "@concat('train_identity.csv failed landing validation: exists=', string(activity('Get_Train_Identity_Metadata').output.exists), ' size=', string(activity('Get_Train_Identity_Metadata').output.size), ' columnCount=', string(activity('Get_Train_Identity_Metadata').output.columnCount), ' expectedColumns=', string(pipeline().parameters.expectedIdentityColumns))",
+                                    "type": "Expression"
+                                },
+                                "errorCode": "RawLandingValidationFailed"
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "annotations": ["phase1", "ieee-cis", "validation"]
+    }
+}

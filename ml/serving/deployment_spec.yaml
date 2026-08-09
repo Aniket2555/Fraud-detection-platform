@@ -1,0 +1,33 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
+
+endpoint_name: ep-fraud-scoring-dev
+name: dp-ensemble-v1
+model: azureml:fraud-ensemble-champion@latest
+
+instance_type: Standard_DS3_v2
+instance_count: 2
+
+environment:
+  conda_file: conda.yaml
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04:latest
+
+code_configuration:
+  code: ./ml/serving/
+  scoring_script: score.py
+
+request_settings:
+  # 100ms was tighter than the synchronous SHAP explanation path in score.py
+  # can reliably meet: SHAP runs for every fraud_probability >= 0.30 (exactly
+  # the transactions most likely to need it), adding real compute on top of
+  # feature lookup + ensemble inference. 500ms keeps headroom for that while
+  # still comfortably inside the decision engine's overall latency budget.
+  request_timeout_ms: 500
+  max_concurrent_requests_per_instance: 10
+
+liveness_probe:
+  initial_delay: 30
+  period: 10
+
+readiness_probe:
+  initial_delay: 30
+  period: 10

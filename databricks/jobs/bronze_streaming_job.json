@@ -1,0 +1,29 @@
+{
+    "name": "phase2-bronze-streaming-ingest",
+    "tags": {
+        "phase": "2",
+        "type": "streaming",
+        "environment": "dev"
+    },
+    "tasks": [
+        {
+            "task_key": "bronze_stream",
+            "notebook_task": {
+                "notebook_path": "/Repos/fraud-detection/databricks/notebooks/bronze/stream_transactions_from_eventhub",
+                "base_parameters": {}
+            },
+            "new_cluster": {
+                "spark_version": "14.3.x-scala2.12",
+                "node_type_id": "Standard_DS3_v2",
+                "num_workers": 0,
+                "spark_conf": {
+                    "spark.master": "local[*]",
+                    "spark.databricks.delta.autoOptimize.optimizeWrite": "true"
+                },
+                "autotermination_minutes": 20
+            }
+        }
+    ],
+    "max_concurrent_runs": 1,
+    "timeout_seconds": 7200
+}

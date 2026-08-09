@@ -1,0 +1,25 @@
+{
+    "name": "tr_manual_ieee_cis",
+    "properties": {
+        "description": "ADF has no 'manual' trigger type -- actual one-time/re-run invocations are started on-demand (az datafactory pipeline create-run, or portal 'Trigger now'), not by this trigger firing. Deployed as a valid ScheduleTrigger in a Stopped runtimeState purely so this IaC artifact passes ARM validation as a deployable placeholder; it is intentionally never started.",
+        "annotations": ["manual", "one-time"],
+        "runtimeState": "Stopped",
+        "pipelines": [
+            {
+                "pipelineReference": {
+                    "referenceName": "pl_ingest_ieee_cis",
+                    "type": "PipelineReference"
+                }
+            }
+        ],
+        "type": "ScheduleTrigger",
+        "typeProperties": {
+            "recurrence": {
+                "frequency": "Day",
+                "interval": 1,
+                "startTime": "2026-01-01T00:00:00Z",
+                "timeZone": "UTC"
+            }
+        }
+    }
+}
