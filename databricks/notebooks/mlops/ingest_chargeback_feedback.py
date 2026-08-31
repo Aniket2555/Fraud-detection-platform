@@ -3,6 +3,14 @@
 # MAGIC # Chargeback & Analyst Feedback Ingestion
 # MAGIC Reconciles raw transactions with delayed chargebacks and analyst manual review decisions.
 # MAGIC Uses idempotent MERGE INTO for incremental updates as labels mature over time.
+# MAGIC
+# MAGIC Production fixes applied:
+# MAGIC - `silver.transactions` (Phase 1's static IEEE-CIS batch table -- no customer_id/card_id
+# MAGIC   columns at all, uses card1/card2/etc. instead) replaced with `silver.streaming_transactions`
+# MAGIC   (the live-replay table these labels are actually meant to reconcile), matching the same fix
+# MAGIC   already applied in ml/training/data_preparation.py.
+# MAGIC - Added CREATE TABLE IF NOT EXISTS for the MERGE target -- MERGE INTO requires the target
+# MAGIC   table to already exist, and nothing else in the pipeline ever created it.
 
 from pyspark.sql.functions import (
     col, when, coalesce, lit, current_timestamp, datediff, current_date
@@ -10,9 +18,27 @@ from pyspark.sql.functions import (
 
 MATURATION_WINDOW_DAYS = 30
 
-transactions_df = spark.table("fraud_detection_dev.silver.transactions")
+transactions_df = spark.table("fraud_detection_dev.silver.streaming_transactions")
 analyst_decisions_df = spark.table("fraud_detection_dev.gold.analyst_decisions_sync")
 chargebacks_df = spark.table("fraud_detection_dev.bronze.chargeback_reports")
+
+spark.sql("""
+    CREATE TABLE IF NOT EXISTS fraud_detection_dev.gold.reconciled_labeled_transactions (
+        transaction_id STRING,
+        customer_id STRING,
+        card_id STRING,
+        merchant_id STRING,
+        event_time_ts TIMESTAMP,
+        amount DOUBLE,
+        latitude DOUBLE,
+        longitude DOUBLE,
+        event_date DATE,
+        is_fraud_reconciled INT,
+        label_source STRING,
+        label_confidence DOUBLE,
+        _reconciled_at TIMESTAMP
+    ) USING DELTA
+""")
 
 reconciled_df = (
     transactions_df.alias("t")
@@ -22,8 +48,11 @@ reconciled_df = (
         col("t.transaction_id"),
         col("t.customer_id"),
         col("t.card_id"),
+        col("t.merchant_id"),
         col("t.event_time_ts"),
         col("t.amount"),
+        col("t.latitude"),
+        col("t.longitude"),
         col("t.event_date"),
 
         when(col("c.transaction_id").isNotNull(), lit(1))

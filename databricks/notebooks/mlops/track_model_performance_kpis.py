@@ -8,6 +8,8 @@
 # MAGIC - MERGE INTO replaces append — prevents duplicate KPI rows accumulating over time
 # MAGIC - Explicit kpi_date included in MERGE match condition
 # MAGIC - Fraction metrics (precision, recall, FPR) computed in SQL for auditability
+# MAGIC - Added CREATE TABLE IF NOT EXISTS for the MERGE target (same gap as
+# MAGIC   ingest_chargeback_feedback.py -- MERGE INTO requires the target to already exist)
 
 from pyspark.sql.functions import (
     col, count, sum as _sum, avg, when, current_timestamp, current_date,
@@ -19,6 +21,26 @@ from pyspark.sql.functions import (
 # This avoids a full-table join and prevents double-counting on daily re-runs.
 # ---------------------------------------------------------------------------
 LOOKBACK_DAYS = 2  # 48h window
+
+spark.sql("""
+    CREATE TABLE IF NOT EXISTS fraud_detection_dev.gold.model_performance_kpis (
+        model_version STRING,
+        kpi_date DATE,
+        total_scored_labeled BIGINT,
+        actual_fraud_count BIGINT,
+        true_positives BIGINT,
+        false_positives BIGINT,
+        false_negatives BIGINT,
+        true_negatives BIGINT,
+        avg_fraud_score DOUBLE,
+        median_fraud_score DOUBLE,
+        p95_fraud_score DOUBLE,
+        precision DOUBLE,
+        recall DOUBLE,
+        false_positive_rate DOUBLE,
+        _computed_at TIMESTAMP
+    ) USING DELTA
+""")
 
 decisions_df = (
     spark.table("fraud_detection_dev.gold.decision_audit_log")

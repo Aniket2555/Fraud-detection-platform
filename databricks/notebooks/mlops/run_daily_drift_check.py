@@ -2,12 +2,41 @@
 # MAGIC %md
 # MAGIC # Daily Automated Feature & Concept Drift Monitoring Job
 # MAGIC Evaluates all 6 feature families + prediction distribution + label rate drift.
+# MAGIC
+# MAGIC Production fixes applied:
+# MAGIC - Bare `from drift_detector import ...` / `from concept_drift_detector import ...`
+# MAGIC   only resolve if `databricks/src/mlops` is separately added to sys.path -- switched
+# MAGIC   to the `fraud_detection.mlops.*` package path used everywhere else (same fix as
+# MAGIC   Known Issue #2 already applied inside concept_drift_detector.py itself).
+# MAGIC - `gold.decision_audit_log` has no `timestamp`/`fraud_score` columns (see
+# MAGIC   ingest_decision_audit_log.py -- they're named `audit_timestamp_utc` and
+# MAGIC   `fraud_probability`); corrected both references.
+# MAGIC - Added CREATE TABLE IF NOT EXISTS for the drift_monitoring_history append target.
+# MAGIC - The retrain trigger's `/Repos/fraud-detection/...` notebook path assumes a
+# MAGIC   Databricks Repos-based deployment, which this workspace doesn't use (notebooks
+# MAGIC   here are run directly via the Command Execution API / as workspace files) --
+# MAGIC   replaced with the actual workspace path this notebook was uploaded to.
 
 import json
 import pandas as pd
 from pyspark.sql.functions import current_timestamp, current_date, lit
-from drift_detector import evaluate_feature_set_drift, compute_aggregate_drift_score
-from concept_drift_detector import detect_prediction_drift, detect_label_rate_drift
+from fraud_detection.mlops.drift_detector import evaluate_feature_set_drift, compute_aggregate_drift_score
+from fraud_detection.mlops.concept_drift_detector import detect_prediction_drift, detect_label_rate_drift
+
+spark.sql("""
+    CREATE TABLE IF NOT EXISTS fraud_detection_dev.gold.drift_monitoring_history (
+        check_date STRING,
+        feature_drift_status STRING,
+        max_psi DOUBLE,
+        mean_jsd DOUBLE,
+        critical_features BIGINT,
+        warning_features BIGINT,
+        concept_drift_status STRING,
+        prediction_psi DOUBLE,
+        label_drift_status STRING,
+        drift_report_json STRING
+    ) USING DELTA
+""")
 
 ref_df = spark.table("fraud_detection_dev.gold.train_feature_snapshot").toPandas()
 
@@ -29,8 +58,8 @@ baseline_scores = spark.table("fraud_detection_dev.gold.train_prediction_baselin
 ).toPandas()["fraud_probability"].values
 
 current_scores = spark.table("fraud_detection_dev.gold.decision_audit_log").filter(
-    "timestamp >= current_date() - 1"
-).select("fraud_score").toPandas()["fraud_score"].values
+    "audit_timestamp_utc >= current_date() - 1"
+).select("fraud_probability").toPandas()["fraud_probability"].values
 
 concept_result = detect_prediction_drift(baseline_scores, current_scores)
 print(f"Concept Drift: {json.dumps(concept_result, indent=2)}")
@@ -73,11 +102,21 @@ should_retrain = (
 
 if should_retrain:
     trigger_reason = f"DRIFT_{aggregate['overall_status']}_CONCEPT_{concept_result['status']}"
-    print(f"🚨 TRIGGERING RETRAINING: {trigger_reason}")
-    dbutils.notebook.run(
-        "/Repos/fraud-detection/databricks/notebooks/mlops/retrain_pipeline",
-        3600,
-        {"trigger_reason": trigger_reason}
-    )
+    print(f"TRIGGERING RETRAINING: {trigger_reason}")
+    try:
+        dbutils.notebook.run(
+            "/Shared/fraud-detection/mlops/retrain_pipeline",
+            3600,
+            {"trigger_reason": trigger_reason}
+        )
+    except Exception as exc:
+        # This workspace doesn't use Databricks Repos -- notebooks are deployed as plain
+        # workspace files under /Shared/fraud-detection/mlops (see
+        # databricks/jobs/mlops_drift_and_retrain_job.json / the deploy step that uploads
+        # them there). If that upload hasn't run yet, don't let drift monitoring itself
+        # fail -- log clearly and let an operator trigger retraining manually.
+        print(f"Could not auto-trigger retrain_pipeline notebook: {exc}")
+        print("Run retrain_pipeline manually, or deploy the mlops notebooks to "
+              "/Shared/fraud-detection/mlops first.")
 else:
-    print("✅ All drift metrics stable. No retraining required.")
+    print("All drift metrics stable. No retraining required.")

@@ -5,8 +5,10 @@
 # MAGIC on the latest reconciled labeled dataset with PIT-joined features.
 # MAGIC
 # MAGIC Production fixes applied:
-# MAGIC - Artifacts saved to DBFS (dbfs:/tmp/challenger_artifacts/) — accessible from ALL cluster nodes
-# MAGIC   (not /tmp/ on driver only)
+# MAGIC - Artifacts saved to local driver disk (/tmp/challenger_artifacts/), not the DBFS
+# MAGIC   FUSE mount (dbfs:/tmp + /dbfs/tmp) -- that mount is disabled on this workspace
+# MAGIC   (same root cause as the GraphFrames checkpoint-dir issue in Phase 3), and the
+# MAGIC   cluster is single-node anyway so there's no multi-node benefit to lose.
 # MAGIC - Added minimum training data size guard (raises error if < 1000 labeled samples)
 # MAGIC - Added fraud rate guard (skips retraining if < 0.1% or > 30% fraud rate — data quality issue)
 # MAGIC - challenger_run_id scoped outside try-block to prevent NameError in gate invocation
@@ -95,9 +97,21 @@ feature_specs = [
 ]
 enriched_df = multi_entity_pit_join(labeled_df, feature_specs)
 
-feature_cols = [c for c in enriched_df.columns if c.startswith((
-    "feature_", "vel_", "geo_", "base_", "merch_", "graph_"
-))]
+# The registered Champion (fraud_detection_dev.gold.fraud_ensemble_champion) was trained
+# on ["amount", "latitude", "longitude"] + prefix-matched engineered features, MINUS
+# base_cust_first_seen_ts/base_cust_last_seen_ts (raw timestamps swept in by the prefix
+# match that FraudEnsemblePyFunc can't cast to float -- base_cust_tenure_days already
+# captures that information numerically). A Challenger trained on a different feature
+# set/count could never be scored by champion_challenger_gate.py's side-by-side
+# comparison at all (FraudEnsemblePyFunc._validate_and_coerce hard-fails on a feature
+# count mismatch), so this must match exactly.
+RAW_FEATURE_COLS = ["amount", "latitude", "longitude"]
+EXCLUDED_TIMESTAMP_COLS = {"base_cust_first_seen_ts", "base_cust_last_seen_ts"}
+feature_cols = RAW_FEATURE_COLS + [
+    c for c in enriched_df.columns
+    if c.startswith(("feature_", "vel_", "geo_", "base_", "merch_", "graph_"))
+    and c not in EXCLUDED_TIMESTAMP_COLS
+]
 
 print(f"Feature engineering complete. n_features={len(feature_cols)}")
 
@@ -116,15 +130,26 @@ X_train, y_train = train_pdf[feature_cols].values, train_pdf["is_fraud_reconcile
 X_val,   y_val   = val_pdf[feature_cols].values,   val_pdf["is_fraud_reconciled"].values
 X_test,  y_test  = test_pdf[feature_cols].values,  test_pdf["is_fraud_reconciled"].values
 
+# NaN guard: geo_dist_km/geo_implied_speed_kmh are null for a card's first-ever
+# transaction (no prior location to diff against), and any PIT-joined feature can
+# be null when a lookback window finds no match. XGBoost tolerates NaN natively,
+# but IsolationForest/StandardScaler/the autoencoder do not and raise ValueError
+# outright -- FraudEnsemblePyFunc already guards this exact case at inference
+# time (_validate_and_coerce), training needs the same guard on its own inputs.
+# float32 to match FraudEnsemblePyFunc._validate_and_coerce's own cast, which is
+# also what the resulting model's inferred signature (below) will require of any
+# caller -- champion_challenger_gate.py builds its evaluation set as float32.
+X_train = np.nan_to_num(X_train.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+X_val   = np.nan_to_num(X_val.astype(np.float32),   nan=0.0, posinf=0.0, neginf=0.0)
+X_test  = np.nan_to_num(X_test.astype(np.float32),  nan=0.0, posinf=0.0, neginf=0.0)
+
 print(f"Split: train={len(y_train):,}, val={len(y_val):,}, test={len(y_test):,}")
 
 # ---------------------------------------------------------------------------
-# 4. Training — all artifacts go to DBFS (accessible from all cluster nodes)
+# 4. Training — all artifacts saved to local driver disk
 # ---------------------------------------------------------------------------
 
-# DBFS path is accessible from both driver and all worker nodes
-ARTIFACTS_DBFS = "dbfs:/tmp/challenger_artifacts/"
-ARTIFACTS_LOCAL = "/dbfs/tmp/challenger_artifacts/"  # POSIX equivalent for file I/O
+ARTIFACTS_LOCAL = "/tmp/challenger_artifacts/"
 os.makedirs(ARTIFACTS_LOCAL, exist_ok=True)
 
 challenger_run_id = None  # Defined outside try so gate call always has access
@@ -199,7 +224,18 @@ with mlflow.start_run(run_name=f"challenger_{trigger_reason}") as run:
 
     # -- Persist artifacts to DBFS --
     joblib.dump(xgb_model,  f"{ARTIFACTS_LOCAL}/xgb_model.pkl")
-    torch.save(ae_model,    f"{ARTIFACTS_LOCAL}/ae_model.pt")
+    # Saved as a plain dict of tensors/ints (state_dict + constructor args), not
+    # the full pickled model object -- lets FraudEnsemblePyFunc load it with
+    # torch.load(weights_only=True), which can't execute arbitrary code even if
+    # the artifact were tampered with (Bandit B614 / CWE-502).
+    torch.save(
+        {
+            "state_dict": ae_model.state_dict(),
+            "input_dim": len(feature_cols),
+            "bottleneck_dim": ae_model.encoder[-2].out_features,
+        },
+        f"{ARTIFACTS_LOCAL}/ae_model.pt",
+    )
     joblib.dump(ae_scaler,  f"{ARTIFACTS_LOCAL}/ae_scaler.pkl")
     joblib.dump(iso_model,  f"{ARTIFACTS_LOCAL}/iso_forest.pkl")
     joblib.dump(cal_xgb,    f"{ARTIFACTS_LOCAL}/cal_xgb.pkl")
@@ -228,10 +264,22 @@ with mlflow.start_run(run_name=f"challenger_{trigger_reason}") as run:
         "feature_names":    f"{ARTIFACTS_LOCAL}/feature_names.json",
         "model_version_tag": f"{ARTIFACTS_LOCAL}/model_version_tag.txt",
     }
+
+    # Unity Catalog requires every registered model version to carry a signature
+    # (input + output schema) -- champion_challenger_gate.py's create_model_version()
+    # call fails outright without one. Build it from one real scored row rather than
+    # skipping validation.
+    from mlflow.models import infer_signature
+    sample_input = X_test[:1]
+    sample_output = final_probs[:1].tolist()
+    signature = infer_signature(sample_input, {"fraud_probability": sample_output[0]})
+
     mlflow.pyfunc.log_model(
-        artifact_path="ensemble_model",
+        name="ensemble_model",
         python_model=FraudEnsemblePyFunc(),
         artifacts=artifact_map,
+        signature=signature,
+        input_example=sample_input,
     )
 
     print(f"Challenger logged to MLflow. Run ID: {challenger_run_id}")
@@ -242,8 +290,16 @@ with mlflow.start_run(run_name=f"challenger_{trigger_reason}") as run:
 if challenger_run_id is None:
     raise RuntimeError("challenger_run_id not set — retraining run did not complete.")
 
-dbutils.notebook.run(
-    "/Repos/fraud-detection/databricks/notebooks/mlops/champion_challenger_gate",
-    timeout_seconds=1800,
-    arguments={"challenger_run_id": challenger_run_id},
-)
+print(f"Challenger ready for evaluation. challenger_run_id={challenger_run_id}")
+try:
+    # This workspace doesn't use Databricks Repos -- see the same fix and rationale
+    # in run_daily_drift_check.py's retrain trigger.
+    dbutils.notebook.run(
+        "/Shared/fraud-detection/mlops/champion_challenger_gate",
+        timeout_seconds=1800,
+        arguments={"challenger_run_id": challenger_run_id},
+    )
+except Exception as exc:
+    print(f"Could not auto-trigger champion_challenger_gate notebook: {exc}")
+    print(f"Run it manually with challenger_run_id={challenger_run_id}, or deploy the "
+          f"mlops notebooks to /Shared/fraud-detection/mlops first.")

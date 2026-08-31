@@ -2,16 +2,25 @@
 Automated Rollback Sentinel.
 Queries live telemetry from Gold tables and reverts model registry version
 if production anomalies exceed safety thresholds.
+
+Production fixes applied:
+- This workspace's model registry is Unity Catalog (3-level names + aliases), not
+  the legacy workspace registry (stages, get_latest_versions(stages=...)) the plan
+  assumed. UC ModelVersion objects have no current_stage/last_updated_timestamp --
+  "rollback" here means reassigning the @champion alias back to the previous
+  version, determined by version number (this pipeline creates exactly one new
+  model version per retrain and only ever promotes that new version or leaves the
+  existing one, so "the previous version by number" is equivalent to "the version
+  that was @champion immediately before the current one").
 """
 
 import mlflow
-import os
-import sys
-from datetime import datetime
 
 FPR_MULTIPLIER_THRESHOLD = 2.0
 LATENCY_P99_THRESHOLD_MS = 100.0
 MIN_BAKE_HOURS = 4
+
+MODEL_NAME = "fraud_detection_dev.gold.fraud_ensemble_champion"
 
 
 def query_production_telemetry(spark) -> dict:
@@ -51,6 +60,7 @@ def query_production_telemetry(spark) -> dict:
 
 def check_and_rollback(spark):
     """Evaluates production health and triggers rollback if anomalies detected."""
+    mlflow.set_registry_uri("databricks-uc")
     telemetry = query_production_telemetry(spark)
 
     rollback_triggered = False
@@ -65,43 +75,27 @@ def check_and_rollback(spark):
         reasons.append(f"Recall collapsed to {telemetry['recent_recall']:.4f} (baseline {telemetry['baseline_recall']:.4f})")
 
     if rollback_triggered:
-        print(f"🚨 ROLLBACK TRIGGERED! Reasons: {reasons}")
+        print(f"ROLLBACK TRIGGERED! Reasons: {reasons}")
         client = mlflow.tracking.MlflowClient()
 
-        prod_versions = client.get_latest_versions("fraud-ensemble-champion", stages=["Production"])
-        # NOTE: get_latest_versions(stages=["Archived"]) returns the version
-        # with the highest *version number* currently archived, not the one
-        # most recently demoted from Production. Across repeated rollback
-        # cycles those diverge: a newer bad model archived later can have a
-        # lower version number than an older bad model archived earlier,
-        # which would revert production to an already-proven-bad model.
-        # search_model_versions + sorting by last_updated_timestamp picks
-        # the version that was *most recently* moved to Archived, which is
-        # the version that was actually in Production immediately before
-        # the current one (promotions auto-archive the prior Production
-        # version via archive_existing_versions=True below).
-        archived_versions = sorted(
-            (
-                v for v in client.search_model_versions("name='fraud-ensemble-champion'")
-                if v.current_stage == "Archived"
-            ),
-            key=lambda v: v.last_updated_timestamp,
+        rm = client.get_registered_model(MODEL_NAME)
+        current_champion_version = int(rm.aliases.get("champion", -1))
+        if current_champion_version < 0:
+            print("No @champion alias set at all. Manual intervention required.")
+            return
+
+        all_versions = sorted(
+            (int(v.version) for v in client.search_model_versions(f"name='{MODEL_NAME}'")),
             reverse=True,
         )
+        prior_versions = [v for v in all_versions if v < current_champion_version]
 
-        if prod_versions and archived_versions:
-            current_ver = prod_versions[0].version
-            prev_ver = archived_versions[0].version
-
-            print(f"Reverting from Version {current_ver} to Version {prev_ver}...")
-            client.transition_model_version_stage(
-                name="fraud-ensemble-champion",
-                version=prev_ver,
-                stage="Production",
-                archive_existing_versions=True
-            )
-            print(f"✅ ROLLBACK COMPLETED. Active version: {prev_ver}")
+        if prior_versions:
+            prev_ver = prior_versions[0]
+            print(f"Reverting @champion from version {current_champion_version} to version {prev_ver}...")
+            client.set_registered_model_alias(MODEL_NAME, "champion", prev_ver)
+            print(f"ROLLBACK COMPLETED. @champion now points to version {prev_ver}.")
         else:
-            print("⚠️ No archived version available for rollback. Manual intervention required.")
+            print("No prior version available for rollback. Manual intervention required.")
     else:
-        print(f"✅ Production healthy. FPR={telemetry['recent_fpr']:.4f}, Recall={telemetry['recent_recall']:.4f}")
+        print(f"Production healthy. FPR={telemetry['recent_fpr']:.4f}, Recall={telemetry['recent_recall']:.4f}")
