@@ -17,7 +17,7 @@ from sklearn.metrics import precision_recall_curve, auc, f1_score, roc_curve
 import joblib
 import yaml
 
-from utils.feature_engineering import FraudFeatureEngineer
+from fraud_detection.ml.training.utils.feature_engineering import FraudFeatureEngineer
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -58,9 +58,14 @@ def compute_metrics(y_true, y_pred_proba, prefix=""):
     }, precision, recall, thresholds
 
 
-def train_baseline(df):
-    """Executes full training pipeline."""
-    mlflow.set_experiment("fraud-detection-baseline")
+def train_baseline(df, experiment_name="/fraud-detection-baseline"):
+    """Executes full training pipeline.
+
+    experiment_name must be an absolute Databricks workspace path when run
+    on Databricks (e.g. "/Users/<user>/fraud-detection-baseline") -- a bare
+    name is only valid against a local/self-hosted MLflow tracking server.
+    """
+    mlflow.set_experiment(experiment_name)
 
     with mlflow.start_run(run_name="xgboost-baseline-v1"):
         train_df, val_df, test_df = load_time_split_data(df)
@@ -117,7 +122,19 @@ def train_baseline(df):
         test_metrics, precision, recall, _ = compute_metrics(y_test, y_test_proba, prefix="test_")
 
         mlflow.log_metrics(test_metrics)
-        mlflow.xgboost.log_model(final_model, "model", registered_model_name="fraud-xgboost-baseline")
+
+        # Unity Catalog model registration requires both an explicit
+        # signature (input/output schema) and a three-level
+        # catalog.schema.name -- a bare name or a signature-less log_model
+        # call (both fine against a plain/non-UC MLflow registry) fail here.
+        from mlflow.models import infer_signature
+        signature = infer_signature(X_train, final_model.predict_proba(X_train))
+        mlflow.xgboost.log_model(
+            final_model, "model",
+            signature=signature,
+            input_example=X_train.head(5),
+            registered_model_name="fraud_detection_dev.gold.fraud_xgboost_baseline",
+        )
 
         print(f"✅ Baseline Training Complete! Test PR-AUC: {test_metrics['test_pr_auc']:.4f}")
         return final_model, test_metrics

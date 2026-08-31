@@ -7,6 +7,7 @@ import uuid
 ADLS_ACCOUNT = dbutils.secrets.get("kv-fraud", "adls-account-name")
 RAW_PATH = f"abfss://raw@{ADLS_ACCOUNT}.dfs.core.windows.net/ieee-cis/"
 CHECKPOINT_PATH = f"abfss://checkpoints@{ADLS_ACCOUNT}.dfs.core.windows.net/bronze/ieee_cis_transactions/"
+SCHEMA_LOCATION = f"{CHECKPOINT_PATH}_schema/"
 BATCH_ID = str(uuid.uuid4())
 
 schema_hints = {
@@ -19,13 +20,15 @@ raw_df = (
         .option("cloudFiles.format", "csv")
         .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
         .option("cloudFiles.inferColumnTypes", "true")
+        .option("cloudFiles.schemaLocation", SCHEMA_LOCATION)
         .option("header", "true")
         .option("multiLine", "false")
         .option("escape", '"')
         .option("nullValue", "")
-        .option("cloudFiles.badRecordsPath", f"abfss://quarantine@{ADLS_ACCOUNT}.dfs.core.windows.net/bronze_parse_failures/")
+        .option("badRecordsPath", f"abfss://quarantine@{ADLS_ACCOUNT}.dfs.core.windows.net/bronze_parse_failures/")
+        .option("pathGlobFilter", "train_transaction.csv")
         .options(**schema_hints)
-        .load(f"{RAW_PATH}train_transaction.csv")
+        .load(RAW_PATH)
 )
 
 bronze_df = (

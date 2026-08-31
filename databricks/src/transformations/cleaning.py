@@ -62,7 +62,7 @@ def synthesize_timestamps(df: DataFrame) -> DataFrame:
         .withColumn("event_time",
             to_timestamp(
                 from_unixtime(
-                    unix_timestamp(lit(REFERENCE_TIMESTAMP)) + col("transaction_dt")
+                    to_timestamp(lit(REFERENCE_TIMESTAMP)).cast("long") + col("transaction_dt")
                 )
             ))
         .withColumn("event_date", col("event_time").cast("date"))

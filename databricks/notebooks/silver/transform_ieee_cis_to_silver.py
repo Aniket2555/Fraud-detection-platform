@@ -23,6 +23,7 @@ from fraud_detection.transformations.cleaning import (
     add_amount_features,
     cast_types
 )
+from fraud_detection.quality.quality_gate import run_bronze_quality_gate
 
 BRONZE_TXN_TABLE = "fraud_detection_dev.bronze.ieee_cis_transactions"
 BRONZE_IDENTITY_TABLE = "fraud_detection_dev.bronze.ieee_cis_identity"
@@ -34,12 +35,14 @@ clean_df, reject_df, quality_report = run_bronze_quality_gate(
     spark, BRONZE_TXN_TABLE, QUARANTINE_TABLE
 )
 
-# Join with identity table
+# Join with identity table. Join on the original bronze column names --
+# clean_df is still PascalCase at this point (the bronze quality gate
+# doesn't rename anything), and the whole joined frame gets renamed to
+# snake_case together, below.
 identity_df = spark.table(BRONZE_IDENTITY_TABLE)
-identity_renamed = rename_columns_to_snake_case(identity_df)
 
 joined_df = clean_df.join(
-    identity_renamed.drop("_ingested_at", "_source_file", "_batch_id", "load_date"),
+    identity_df.drop("_ingested_at", "_source_file", "_batch_id", "load_date", "_rescued_data"),
     on="TransactionID",
     how="left"
 )
