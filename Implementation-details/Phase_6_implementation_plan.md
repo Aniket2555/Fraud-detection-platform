@@ -1199,6 +1199,8 @@ fraud-detection-platform/
 │   └── automated_rollback_sentinel.py            # [NEW] Live telemetry rollback with archived version revert
 │
 └── docs/
+    ├── execution-log/
+    │   └── 08-mlops-loop.md                      # [NEW] Real deployment log: drift, retrain, gate, promote, real rollback
     └── mlops_runbook.md                          # [NEW] MLOps operational runbook (triggers, gates, rollback)
 ```
 

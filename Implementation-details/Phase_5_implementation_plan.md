@@ -988,6 +988,9 @@ fraud-detection-platform/
 │   └── dlq_replay_handler.py                  # [NEW] Manual DLQ replay for resolved issues
 │
 └── docs/
+    ├── execution-log/
+    │   ├── 07-decision-engine.md               # [NEW] Real deployment log: Service Bus/SQL/App Config, Functions, audit-logger bug
+    │   └── 10-followup-fixes.md                # [NEW] Follow-up: Logic Apps (this phase's workflows) deployed for real
     └── case_management_workflow.md            # [NEW] Analyst operational runbook + API contract
 ```
 

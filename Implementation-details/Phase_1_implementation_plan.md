@@ -1865,11 +1865,14 @@ fraud-detection-platform/
 │   └── requirements.txt
 │
 └── docs/
+    ├── execution-log/
+    │   └── 03-data-landing.md              # [NEW] Real deployment log: Bronze/Silver/Gold, baseline model
     └── phase1/
         ├── dataset_analysis.md
-        ├── column_classification.md
-        ├── transformation_decisions.md
         └── baseline_model_report.md
+        # column_classification.md and transformation_decisions.md were
+        # in the original plan's file tree but never actually produced —
+        # removed here to match what's really in docs/phase1/.
 ```
 
 ---

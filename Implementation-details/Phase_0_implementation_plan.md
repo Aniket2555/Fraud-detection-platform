@@ -1514,6 +1514,11 @@ fraud-detection-platform/
 ├── .gitignore
 ├── README.md
 └── docs/
+    ├── end_to_end_guide.md                 # [NEW] Full platform walkthrough, all phases
+    ├── execution-log/
+    │   ├── 00-overview.md                  # [NEW] Index — resource names, links, full bug list
+    │   ├── 01-local-environment.md         # [NEW] Real deployment log: local dev environment fixes
+    │   └── 02-infrastructure.md            # [NEW] Real deployment log: Terraform apply, CI secrets
     └── phase0/
         ├── free_trial_budget_guide.md      # Daily cost tracking instructions
         └── upgrade_to_production.md        # What to change when upgrading

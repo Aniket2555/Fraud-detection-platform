@@ -951,6 +951,9 @@ fraud-detection-platform/
 │   └── verify_platform_end_to_end.sh            # [NEW] 8-step platform verification runbook
 │
 └── docs/
+    ├── execution-log/
+    │   ├── 09-governance-security.md            # [NEW] Real deployment log: UC masking, PII hashing, 4-scan CI, chaos, secret rotation
+    │   └── 10-followup-fixes.md                 # [NEW] Follow-up: chaos test_03 latency fix, UC masking re-enabled via view
     ├── security_architecture.md                 # [NEW] PCI-DSS scope, RBAC, network security documentation
     └── operational_readiness_signoff.md         # [NEW] 17-item production readiness checklist
 ```

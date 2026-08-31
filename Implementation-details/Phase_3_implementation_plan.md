@@ -1334,6 +1334,8 @@ fraud-detection-platform/
 │       └── feature_engineering_job.json                 # [NEW] 5-task Databricks Workflow
 │
 └── docs/
+    ├── execution-log/
+    │   └── 05-feature-engineering.md                    # [NEW] Real deployment log: feature store, GraphFrames, Cosmos DB
     └── feature_store_catalog.md                         # [NEW] Full feature documentation (43 features)
 ```
 

@@ -1549,6 +1549,8 @@ fraud-detection-platform/
 │       └── bronze_streaming_job.json                  # [NEW] Databricks job definition
 │
 ├── docs/
+│   ├── execution-log/
+│   │   └── 04-streaming.md                     # [NEW] Real deployment log: Event Hubs, producer, streaming
 │   └── runbooks/
 │       └── streaming_recovery.md               # [NEW] Recovery runbook for streaming failures
 │

@@ -1156,6 +1156,8 @@ fraud-detection-platform/
 │       └── test_latency_benchmark.py      # [NEW] Benchmarks scoring path SLA (<100ms)
 │
 └── docs/
+    ├── execution-log/
+    │   └── 06-model-ensemble.md           # [NEW] Real deployment log: hybrid ensemble training, scoring, circuit breaker
     └── model_card_hybrid_v1.md            # [NEW] Model Card & Audit documentation
 ```
 
