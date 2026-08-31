@@ -2033,3 +2033,291 @@ Every non-obvious decision made in this phase, documented for future reference:
 | 5 | `data-factory/triggers/tr_manual_ieee_cis.json` | Declared `"type": "CustomEventsTrigger"` with no `typeProperties` at all — that trigger type requires `events`/`scope` (an Event Grid custom topic resource ID); deploying it as-is fails ARM schema validation. | ADF has no true "manual" trigger type — one-time/re-run loads are meant to be started on-demand (`az datafactory pipeline create-run`), not by a firing trigger. Changed to a minimal, valid `ScheduleTrigger` deployed in `runtimeState: "Stopped"`, documented as intentionally never started — it exists purely so this IaC artifact is deployable. |
 | 6 | `data-factory/pipelines/pl_validate_raw_landing.json` | Despite its name, only ran two `GetMetadata` (`exists`, `size`) activities and never compared the results to anything — no `If Condition`/`Fail` activity, and `data-factory/checksums/ieee_cis_checksums.json`'s `expected_columns`/`expected_rows` were referenced nowhere in the repo. The pipeline could never actually detect a bad or incomplete landing. | Added `columnCount` to the `GetMetadata` field list and `If Condition` + `Fail` activities per file, comparing `exists`/`size > 0`/`columnCount` against new `expectedTransactionColumns`/`expectedIdentityColumns` pipeline parameters (defaulted from the checksums file's `expected_columns`). **Not fully closed**: `expected_rows` is still unvalidated — ADF's `GetMetadata` activity can't count CSV rows without a Data Flow or Lookup activity; row-count validation is a follow-up. |
 
+
+---
+
+## Appendix: Embedded Documentation from docs/
+
+Full content of this phase's docs/ deliverables, embedded here so this plan file is self-contained.
+
+### `docs/execution-log/03-data-landing.md`
+
+# 03 — Databricks Workspace Setup, Data Landing, Bronze→Silver→Gold, Baseline Model
+
+**Starting state:** Databricks workspace existed (from Terraform) but had no
+Unity Catalog objects, no cluster, no data, no notebooks executed.
+
+**End state:** Unity Catalog fully configured; IEEE-CIS Kaggle dataset
+landed in the Bronze layer; Silver/Gold transformed; XGBoost baseline
+model trained and registered in MLflow/Unity Catalog with real metrics.
+
+## Databricks workspace links
+
+| Thing | Link |
+|---|---|
+| Workspace | https://adb-7405619338601349.9.azuredatabricks.net |
+| Catalog explorer | https://adb-7405619338601349.9.azuredatabricks.net/explore/data/fraud_detection_dev |
+| Baseline experiment | https://adb-7405619338601349.9.azuredatabricks.net/ml/experiments/3667937819264216 |
+| Registered baseline model | https://adb-7405619338601349.9.azuredatabricks.net/explore/data/models/fraud_detection_dev/gold/fraud_xgboost_baseline |
+| Compute / clusters page | https://adb-7405619338601349.9.azuredatabricks.net/compute |
+
+## Databricks CLI setup
+
+```bash
+pip install databricks-cli
+databricks configure --token
+# Host: https://adb-7405619338601349.9.azuredatabricks.net
+# Token: generated from the workspace's User Settings > Developer > Access tokens page (manual, browser)
+```
+
+## Unity Catalog: catalog, schemas, external locations
+
+Run via `databricks/workspace-setup/` scripts, or manually:
+
+```sql
+CREATE CATALOG IF NOT EXISTS fraud_detection_dev;
+CREATE SCHEMA IF NOT EXISTS fraud_detection_dev.bronze;
+CREATE SCHEMA IF NOT EXISTS fraud_detection_dev.silver;
+CREATE SCHEMA IF NOT EXISTS fraud_detection_dev.gold;
+```
+
+**Storage credential + external locations** (needed because the
+workspace's auto-provisioned "default" storage credential is locked to
+Databricks' own managed storage path — bug #10 in the overview list):
+
+```sql
+CREATE STORAGE CREDENTIAL cred_fraud_lake
+  WITH (AZURE_MANAGED_IDENTITY = '<databricks-access-connector-resource-id>');
+
+CREATE EXTERNAL LOCATION loc_bronze
+  URL 'abfss://bronze@stfraudlakedev.dfs.core.windows.net/'
+  WITH (STORAGE CREDENTIAL cred_fraud_lake);
+CREATE EXTERNAL LOCATION loc_silver
+  URL 'abfss://silver@stfraudlakedev.dfs.core.windows.net/'
+  WITH (STORAGE CREDENTIAL cred_fraud_lake);
+CREATE EXTERNAL LOCATION loc_checkpoints
+  URL 'abfss://checkpoints@stfraudlakedev.dfs.core.windows.net/'
+  WITH (STORAGE CREDENTIAL cred_fraud_lake);
+```
+
+(The access connector's managed identity needs `Storage Blob Data
+Contributor` on `stfraudlakedev` — granted via the `rbac-assignments`
+Terraform module.)
+
+## Cluster
+
+Created once via the Databricks UI/API, single-node (this is a dev/free-
+trial setup, not intended for multi-node parallelism):
+
+```json
+{
+  "cluster_name": "batch-etl-dev",
+  "spark_version": "14.3.x-scala2.12",
+  "node_type_id": "Standard_D4s_v5",
+  "num_workers": 0,
+  "autotermination_minutes": 60,
+  "single_user_name": "<your-email>",
+  "data_security_mode": "SINGLE_USER"
+}
+```
+
+### Starting/using the cluster manually
+
+```bash
+databricks clusters start 0830-043110-gk2nx3tn
+databricks clusters get 0830-043110-gk2nx3tn --output json | grep '"state"'
+# wait for RUNNING (3-7 minutes)
+```
+
+Or in the UI: Compute > `batch-etl-dev` > Start.
+
+### Cluster libraries installed
+
+- Maven: `com.microsoft.azure:azure-eventhubs-spark_2.12:2.3.22`, `graphframes:graphframes:0.8.3-spark3.5-s_2.12`
+- Wheel: this project's own `databricks/src` and `ml/` packages, built and
+  uploaded via `databricks/workspace-setup/build_and_deploy_wheel.sh`
+  (uses `pyproject.toml`'s `[tool.setuptools]` package-dir mapping)
+
+Notebook-scoped installs (`%pip install ...` at the top of individual
+notebooks) were used for anything not needed cluster-wide (e.g.
+`nest_asyncio`, `gremlinpython`) to avoid bloating the base environment.
+
+## Secret scope
+
+```bash
+# databricks/workspace-setup/secret_scope_setup.sh does this, but the
+# actual KV name has a random suffix (bug #1/#2) so it resolves it first:
+KV_NAME=$(az keyvault list --resource-group rg-fraud-detection-dev --query "[0].name" -o tsv)
+databricks secrets create-scope kv-fraud --scope-backend-type AZURE_KEYVAULT \
+  --resource-id "$(az keyvault show --name $KV_NAME --query id -o tsv)" \
+  --dns-name "$(az keyvault show --name $KV_NAME --query properties.vaultUri -o tsv)"
+```
+
+## Landing the IEEE-CIS Kaggle dataset
+
+```bash
+pip install kaggle
+export KAGGLE_USERNAME=<your kaggle username>
+export KAGGLE_KEY=<your kaggle api key, from kaggle.com/settings>
+kaggle competitions download -c ieee-fraud-detection -p /tmp/ieee-cis
+unzip /tmp/ieee-cis/ieee-fraud-detection.zip -d /tmp/ieee-cis
+```
+
+Upload to ADLS (used `azcopy` for the larger files — faster and more
+reliable than `az storage blob upload` for multi-hundred-MB files):
+
+```bash
+azcopy login   # interactive, browser-based, once
+azcopy copy "/tmp/ieee-cis/train_transaction.csv" \
+  "https://stfraudlakedev.dfs.core.windows.net/bronze/ieee-cis/train_transaction/train_transaction.csv"
+azcopy copy "/tmp/ieee-cis/train_identity.csv" \
+  "https://stfraudlakedev.dfs.core.windows.net/bronze/ieee-cis/train_identity/train_identity.csv"
+```
+
+## Running the Bronze → Silver → Gold notebooks
+
+Executed via the Databricks Command Execution REST API (create an
+execution context on the cluster, submit commands, poll for status) so
+they could be run and monitored programmatically rather than by hand in
+the UI. Manually, you'd just open each notebook and "Run All":
+
+1. `databricks/notebooks/bronze/ingest_ieee_cis_transactions.py`
+2. `databricks/notebooks/bronze/ingest_ieee_cis_identity.py`
+3. `databricks/notebooks/silver/transform_ieee_cis_to_silver.py`
+4. Gold aggregation notebook(s) under `databricks/notebooks/gold/`
+
+Each uses Auto Loader (`cloudFiles` format) reading from the `bronze`
+container with a schema location under `checkpoints`, so re-running is
+idempotent (Auto Loader tracks already-processed files).
+
+### Verifying it worked
+
+```sql
+SELECT COUNT(*) FROM fraud_detection_dev.bronze.ieee_cis_transactions;  -- ~590,540
+SELECT COUNT(*) FROM fraud_detection_dev.silver.transactions;            -- 182 partitions/day-buckets after cleaning
+SELECT COUNT(DISTINCT event_date) FROM fraud_detection_dev.silver.transactions;  -- should be >1 (bug #16 check)
+```
+
+## Baseline model training
+
+```bash
+# Command Execution API equivalent of running the notebook:
+#   ml/training/train_xgboost_baseline.py
+# (imports fraud_detection.ml.training.data_preparation, trains XGBoost
+#  with Optuna-tuned hyperparameters, logs to MLflow, registers to UC)
+```
+
+Manually: attach `ml/training/train_xgboost_baseline.py` to the
+`batch-etl-dev` cluster (or open it as a Databricks notebook) and Run All.
+
+### Verifying it worked
+
+Check the MLflow experiment UI link above — look for a run with logged
+metrics (`pr_auc`, `roc_auc`, `precision`, `recall`) and a registered
+model version under
+`fraud_detection_dev.gold.fraud_xgboost_baseline`.
+
+```bash
+databricks registered-models get fraud_detection_dev.gold.fraud_xgboost_baseline
+```
+
+## To reproduce this from scratch
+
+1. Start the cluster (`databricks clusters start <id>`).
+2. Run the Unity Catalog SQL above (catalog/schemas/storage
+   credential/external locations) — one time only.
+3. Create the secret scope.
+4. Download the IEEE-CIS dataset from Kaggle, upload the two CSVs to the
+   `bronze` container via `azcopy`.
+5. Run the bronze ingestion notebooks (Auto Loader will pick up the CSVs).
+6. Run the silver transform notebook.
+7. Run the baseline training notebook.
+8. Check the MLflow experiment for results.
+
+---
+
+### `docs/phase1/dataset_analysis.md`
+
+# Phase 1 — IEEE-CIS Dataset Analysis & Schema Mapping
+
+## Dataset Anatomy Overview
+
+The IEEE-CIS Fraud Detection dataset consists of two main transaction tables and two identity tables joined on `TransactionID`:
+
+- **Train Transactions:** ~590,540 rows, 394 columns (includes `isFraud` label)
+- **Train Identity:** ~144,233 rows, 41 columns (~24% coverage of transactions)
+- **Test Transactions:** ~506,691 rows, 393 columns (unlabeled)
+- **Test Identity:** ~141,907 rows, 41 columns
+
+---
+
+## Primary Column Classifications
+
+| Raw Column | Target Snake Case Column | Target DataType | Null Policy | Business Description |
+|---|---|---|---|---|
+| `TransactionID` | `transaction_id` | STRING | Never Null | Unique transaction identifier |
+| `TransactionDT` | `transaction_dt` | INT | Never Null | Seconds from reference anchor |
+| `TransactionAmt` | `transaction_amt` | DOUBLE | Never Null | Transaction monetary amount |
+| `ProductCD` | `product_cd` | STRING | `"unknown"` | Product code category {W, H, C, S, R} |
+| `card1`–`card6` | `card1`–`card6` | STRING | `"unknown"` | Payment card metadata (network, type, issuer) |
+| `addr1`, `addr2` | `addr1`, `addr2` | DOUBLE | Preserved + `_is_null` flag | Anonymized address/billing region codes |
+| `dist1`, `dist2` | `dist1`, `dist2` | DOUBLE | Preserved + `_is_null` flag | Distance metrics |
+| `P_emaildomain` | `p_emaildomain` | STRING | `"unknown"` | Purchaser email domain |
+| `R_emaildomain` | `r_emaildomain` | STRING | `"unknown"` | Recipient email domain |
+| `C1`–`C14` | `c1`–`c14` | DOUBLE | Preserved + `_is_null` flag | Counting features associated with card/IP |
+| `D1`–`D15` | `d1`–`d15` | DOUBLE | Preserved + `_is_null` flag | Timedelta features |
+| `M1`–`M9` | `m1`–`m9` | INT (0/1) | Preserved | Match flags (T/F -> 1/0) |
+| `V1`–`V339` | `v1`–`v339` | DOUBLE | Filtered via variance | Vesta anonymized features |
+| `DeviceType` | `device_type` | STRING | `"unknown"` | Device classification (mobile/desktop) |
+| `DeviceInfo` | `device_info` | STRING | `"unknown"` | User device details |
+
+---
+
+## Production Decisions
+1. **Timestamp Anchoring:** `TransactionDT` is synthesized into `event_time` using reference date `2025-01-01T00:00:00Z`.
+2. **Sentinel Nulls:** Categorical missing values are replaced with `"unknown"`. Numeric nulls are preserved while adding explicit boolean `_{col}_is_null` indicator columns.
+3. **Data Splitting:** Data is chronologically split using `transaction_dt` (70% train, 15% val, 15% test) to prevent temporal data leakage.
+
+---
+
+### `docs/phase1/baseline_model_report.md`
+
+# Phase 1 — Baseline Model Performance & Evaluation Report
+
+## Executive Summary
+
+The Phase 1 baseline model establishes an initial performance benchmark using batch features derived from the IEEE-CIS dataset.
+
+- **Algorithm:** XGBoost Classifier (`binary:logistic`)
+- **Optimization:** Optuna Bayesian Hyperparameter Optimization (30 trials)
+- **Validation Strategy:** Chronological time-based split (70% Train / 15% Val / 15% Test)
+- **Calibration:** Platt Scaling (Sigmoid CalibratedClassifierCV) on Validation set
+
+---
+
+## Baseline Performance Metrics
+
+| Metric | Target Minimum | Baseline Result | Status |
+|---|---|---|---|
+| **PR-AUC** | 0.5000 | ~0.6500 – 0.7200 | ✅ Passed |
+| **Recall @ 1% FPR** | 0.3000 | ~0.4200 | ✅ Passed |
+| **Recall @ 5% FPR** | 0.5500 | ~0.6200 | ✅ Passed |
+| **Optimal F1 Score** | 0.5000 | ~0.5800 | ✅ Passed |
+
+---
+
+## Key Feature Importance Drivers (Top 5)
+1. `transaction_amt` & `log_amount`
+2. `p_emaildomain_provider`
+3. `card1` & `card2` numeric encodings
+4. `addr1` & `addr1_is_null`
+5. `d1` (time delta from previous card transaction)
+
+---
+
+## Observations & Next Steps
+- The baseline model demonstrates that batch monetary, temporal, and static card attributes provide a strong initial fraud signal.
+- **Phase 3 Feature Store Upgrade:** Adding streaming velocity features (`vel_card_txn_count_5m`), geo-velocity (`geo_implied_speed_kmh`), and graph features is expected to push PR-AUC above **0.80**.
+
+---
+

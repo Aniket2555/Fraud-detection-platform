@@ -1387,3 +1387,227 @@ fraud-detection-platform/
 | 2 | Repo-wide packaging (`fraud_detection.features.*` namespace) | See Phase 1's "Known Issues" — the `fraud_detection` package this phase's feature modules are imported as didn't exist, so `databricks/tests/test_features/*` couldn't be collected. | Fixed by the root `pyproject.toml` added in Phase 1. `pytest databricks/tests/` now passes (8/8, incl. `test_stateless_features`, `test_velocity_features`, `test_geo_features`). |
 | 3 | `gold.customer_behavioral_baselines`, `gold.merchant_risk_baselines`, `gold.graph_entity_metrics` (§3.2/§3.5) — consumed by `ml/training/data_preparation.py` | **Architectural gap — now fixed.** These three tables were MERGE-upserted to hold only the *current* value per entity, so there was no historized row to point-in-time join against. `ml/training/data_preparation.py` joined them with a plain `DataFrame.join(..., "left")` on entity id — for a training row from 3 months ago, this attached whatever the baseline/risk/graph value was *today*, not what it was at that transaction's `event_time`. Real label leakage for those three feature families, even though velocity/geo in the same function correctly used `multi_entity_pit_join`. | `compute_behavioral_baselines.py`, `compute_merchant_risk.py`, and `compute_graph_metrics.py` now append a dated snapshot per run (keyed on `(entity_id, snapshot_date)`, partitioned by `snapshot_date`) instead of overwriting in place, and rename their timestamp column to the repo's `feature_timestamp` convention. `data_preparation.py` and `retrain_pipeline.py` (Phase 6) now join all three families through `multi_entity_pit_join` with a 3-day lookback (tolerates a missed daily/hourly run). **Caveat:** historization only starts accumulating from this fix's deployment forward — training rows from before deployment will have no historical snapshot to join against within the lookback window and will correctly get NULL for these features (tested behavior, not a bug) rather than a leakage-inflated value. |
 | 4 | `databricks/src/features/point_in_time_join.py::point_in_time_feature_join` | **Found while adding test coverage for this fix.** Chaining multiple PIT joins via `multi_entity_pit_join` — which production code already did, reusing `entity_key="card_id"` for both `card_velocity` and `geo_velocity` in the same call — left two identically-named `card_id` columns (and two `feature_timestamp` columns, since every feature table uses that same column name by convention) in the accumulated result. The next join in the chain then failed with `AnalysisException: AMBIGUOUS_REFERENCE` the moment it re-aliased the accumulated frame as `obs`. No test existed to catch this — `databricks/tests/test_features/test_point_in_time_join.py` is new (5 tests: latest-snapshot selection, no-future-leakage, new-entity-returns-null, lookback-window exclusion, and multi-spec chaining with mixed lookbacks). | `point_in_time_feature_join` now drops the feature-side's `entity_key` and `feat_time_col` columns after each join (the obs-side copies are identical by the join condition and are retained), so chaining any number of PIT joins — including repeated `entity_key`s — no longer collides. Verified: all 5 new tests pass, plus the full `databricks/tests/` suite (13/13). |
+
+---
+
+## Appendix: Embedded Documentation from docs/
+
+Full content of this phase's docs/ deliverables, embedded here so this plan file is self-contained.
+
+### `docs/execution-log/05-feature-engineering.md`
+
+# 05 — Feature Engineering, GraphFrames, Cosmos DB Graph
+
+**Starting state:** feature-computation notebooks existed but pointed at
+the wrong (Phase 1 batch) table, and `materialize_feature_store.py` was
+entirely commented out. Cosmos DB Gremlin edge-writing had never
+connected successfully even once.
+
+**End state:** behavioral baselines, merchant risk, and graph metrics all
+computed off the real streaming table; feature store materialized; a real
+transaction/card/merchant graph live in Cosmos DB Gremlin, with degree
+centrality, PageRank, and connected-components features flowing back.
+
+## The wrong-table bug (bugs #22-25)
+
+`stream_silver_from_bronze.py` was originally merging live Event-Hub data
+into the *same* `silver.transactions` table the Phase 1 batch pipeline
+had already populated from the static IEEE-CIS Kaggle CSVs — two
+incompatible schemas (different columns, different semantics for
+`event_date` vs `event_time_ts`). This wasn't just wrong output — it
+actively corrupted the Phase 1 baseline table on every micro-batch.
+
+Fixed by routing streaming writes to a new table,
+`silver.streaming_transactions`, and updating every downstream
+feature notebook (`compute_behavioral_baselines.py`,
+`compute_merchant_risk.py`, `compute_graph_metrics.py`) to read from it
+instead. Also fixed along the way:
+- `compute_behavioral_baselines.py` referenced a nonexistent
+  `event_date` column on the streaming table — the streaming table only
+  has `event_time_ts` (a real timestamp, not a pre-truncated date).
+- `compute_merchant_risk.py` filtered `is_fraud == 1` against what is
+  actually a boolean column — fixed to `is_fraud == True`.
+
+## Running the feature notebooks
+
+Via the Databricks Command Execution API, or manually as notebooks
+attached to `batch-etl-dev`:
+
+1. `databricks/notebooks/features/compute_behavioral_baselines.py`
+2. `databricks/notebooks/features/compute_merchant_risk.py`
+3. `databricks/notebooks/features/compute_graph_metrics.py`
+4. `databricks/notebooks/features/materialize_feature_store.py`
+
+### `materialize_feature_store.py` (bug #31)
+
+Was entirely commented out (matching the repo's own `TODO.md` admission)
+and additionally referenced the wrong table when uncommented. Rewritten
+to actually join behavioral, merchant-risk, and graph features into the
+`gold.feature_store` table, keyed by `transaction_id`, ready for the
+Phase 4 training pipeline's point-in-time join.
+
+## GraphFrames: connectedComponents() checkpoint bug (bug #26)
+
+`connectedComponents()` internally requires
+`sparkContext.setCheckpointDir(...)`, which is a raw Spark-context-level
+directory setting — it doesn't go through Unity Catalog's governed table/
+volume paths at all, and DBFS root is disabled on UC-enabled workspaces.
+Fixed by pointing the checkpoint dir at **local disk** on the driver
+(`file:/tmp/graphframes-checkpoints`), which only works because the
+cluster is single-node (no distributed filesystem needed to make local
+paths consistent across executors).
+
+```python
+spark.sparkContext.setCheckpointDir("file:/tmp/graphframes-checkpoints")
+```
+
+## Cosmos DB Gremlin: streaming edge writer
+
+`stream_edges_to_cosmos.py` had three separate connectivity/correctness
+bugs (#27-30):
+
+1. **Wrong secret scope name** — referenced `fraud-secrets`, the actual
+   scope created in `04-streaming.md`/`03-data-landing.md` is `kv-fraud`.
+2. **Event loop conflict** — `gremlin_python`'s client manages its own
+   asyncio event loop, but the notebook kernel already has one running.
+   Fixed with `nest_asyncio.apply()` at the top of the notebook.
+3. **GraphSON version mismatch** — Cosmos DB's Gremlin API only speaks
+   GraphSON 2.0; `gremlin_python`'s default client serializer is 3.0. The
+   symptom was subtle: the connection succeeds, but the server silently
+   closes it on the first real request. Fixed by passing
+   `GraphSONSerializersV2d0()` explicitly when constructing the client.
+4. **Fire-and-forget writes** — `upsert_edge()`'s three Gremlin
+   submissions (`g.V(...)`, `g.V(...)`, `g.addE(...)`) were dispatched
+   without waiting on `.all().result()`, creating a real race (an edge
+   could be submitted before its vertices existed) and silently
+   swallowing any server-side errors. Fixed to synchronously await each
+   step.
+
+### Cosmos DB Gremlin connection info
+
+```bash
+COSMOS_ACCOUNT=cosmos-fraud-dev-604t
+az cosmosdb show --name $COSMOS_ACCOUNT --resource-group rg-fraud-detection-dev \
+  --query documentEndpoint -o tsv
+# Gremlin endpoint is the same account, port 443, wss:// (gremlinpython
+# constructs this from the account name automatically)
+```
+
+The Gremlin key was fetched once, with explicit user approval (Gremlin's
+wire protocol has no scoped-RBAC alternative — it's master-key-only),
+and stored in the `kv-fraud` secret scope, never printed to the
+transcript.
+
+### Verifying it worked
+
+Query the graph directly (via a notebook cell using the same
+`gremlin_python` client):
+```python
+g.V().count().next()          # vertex count growing
+g.E().count().next()          # edge count growing
+```
+
+```python
+for q in spark.streams.active:
+    print(q.name, q.status)   # confirm the edge-writer stream is running, not stalled
+```
+
+### Graph metrics back into features
+
+`compute_graph_metrics.py` runs PageRank, connected components, and
+degree centrality over the (batch snapshot of the) graph using
+GraphFrames directly on the Silver Delta table — not by reading back from
+Cosmos — since GraphFrames needs a Spark DataFrame representation
+regardless. Cosmos DB serves the graph for *online*/serving-time lookups
+(e.g., "is this card connected to a known fraud ring right now"); the
+batch GraphFrames computation is for offline feature engineering.
+
+## To reproduce this from scratch
+
+1. Ensure the streaming silver table (`04-streaming.md`) is populated.
+2. Run `compute_behavioral_baselines.py`, `compute_merchant_risk.py`.
+3. Set the local-disk checkpoint dir, then run `compute_graph_metrics.py`.
+4. Run `materialize_feature_store.py`.
+5. Start `stream_edges_to_cosmos.py` as a continuous streaming job (needs
+   the transaction producer from `04-streaming.md` running to have
+   anything to write).
+6. Verify vertex/edge counts climbing in Cosmos DB via the Gremlin
+   console or a notebook cell.
+
+---
+
+### `docs/feature_store_catalog.md`
+
+# Feature Store Catalog
+
+This catalog documents all 43 features across 6 feature families implemented in Phase 3.
+
+---
+
+## 1. Stateless Transaction Features (`FF_TRX`) — 11 Features
+- `feature_log_amount`: `log1p(amount)`
+- `feature_hour_of_day`: Hour of transaction [0-23]
+- `feature_day_of_week`: Day of week [1-7]
+- `feature_is_weekend`: Flag indicating weekend transaction (1/0)
+- `feature_is_night`: Flag indicating late-night transaction 00:00–05:59 (1/0)
+- `feature_billing_shipping_mismatch`: Flag indicating cross-border shipping mismatch
+- `feature_amount_bucket`: Categorical tier {micro, small, medium, large, high_value}
+- `feature_card_merchant_pair`: SHA256 entity hash signature
+- `feature_payment_method_idx`: Integer-encoded payment instrument
+- `feature_channel_idx`: Integer-encoded origin channel
+- `feature_amount_zscore_vs_baseline`: Deviation from customer 90-day mean
+
+---
+
+## 2. Card & Customer Velocity (`FF_VEL`) — 12 Features
+- `vel_card_txn_count_5m`: 5-minute sliding card transaction count
+- `vel_card_avg_amount_5m`: 5-minute sliding average amount
+- `vel_card_std_amount_5m`: 5-minute sliding standard deviation
+- `vel_card_max_amount_5m`: 5-minute sliding max amount
+- `vel_card_sum_amount_5m`: 5-minute sliding total amount
+- `vel_card_txn_count_1h`: 1-hour sliding card transaction count
+- `vel_card_sum_amount_1h`: 1-hour sliding card total amount
+- `vel_cust_txn_count_1h`: 1-hour sliding customer transaction count
+- `vel_cust_avg_amount_1h`: 1-hour sliding customer average amount
+- `vel_cust_sum_amount_1h`: 1-hour sliding customer total amount
+- `vel_cust_distinct_merchants_1h`: 1-hour distinct merchant count
+- `vel_cust_distinct_devices_24h`: 24-hour distinct device count
+
+---
+
+## 3. Geo-Velocity & Impossible Travel (`FF_GEO`) — 4 Features
+- `geo_dist_km`: Great-circle Haversine distance between consecutive card transactions
+- `time_delta_hours`: Time difference in hours
+- `geo_implied_speed_kmh`: Calculated travel speed (km/h)
+- `geo_flag_impossible_travel`: Flag set to 1 if speed > 900 km/h
+
+---
+
+## 4. Merchant Risk Features (`FF_MERCH`) — 4 Features
+- `merch_avg_ticket_30d`: 30-day average transaction amount
+- `merch_txn_count_30d`: 30-day transaction volume
+- `merch_fraud_count_30d`: 30-day historical fraud count
+- `merch_fraud_ratio_30d`: 30-day fraud ratio
+
+---
+
+## 5. Behavioral & Customer Baseline (`FF_BASE`) — 7 Features
+- `base_cust_90d_avg_amount`: 90-day average amount
+- `base_cust_90d_std_amount`: 90-day standard deviation
+- `base_cust_90d_txn_count`: 90-day transaction count
+- `base_cust_90d_median_amount`: 90-day median transaction amount
+- `base_cust_tenure_days`: Account tenure in days
+- `base_cust_first_seen_ts`: First transaction timestamp
+- `base_cust_last_seen_ts`: Most recent transaction timestamp
+
+---
+
+## 6. Graph Features (`FF_GRAPH`) — 5 Features
+- `graph_device_sharing_count_24h`: Distinct customers on device in 24 hours
+- `graph_ip_sharing_count_1h`: Distinct cards on IP hash in 1 hour
+- `graph_pagerank_score`: Entity PageRank centrality score
+- `graph_degree_centrality`: Total connected edges count
+- `graph_community_id`: Connected component partition ID
+
+---
+

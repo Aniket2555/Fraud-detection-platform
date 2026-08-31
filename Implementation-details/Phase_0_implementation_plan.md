@@ -1573,3 +1573,1361 @@ fraud-detection-platform/
 | 1 | `infrastructure/modules/storage-account.bicep` (now `infrastructure/modules/storage-account/main.tf` after the Terraform migration — the fix carried forward) | The `containers` list provisioned `raw/bronze/silver/gold/quarantine/checkpoints/feature-store/eventhubs-capture` but not `staging` — even though `data-factory/pipelines/pl_ingest_ieee_cis.json`'s own description says it "ingests IEEE-CIS dataset CSVs from staging/blob landing" and `data-factory/datasets/ds_source_ieee_cis_csv.json` reads from `fileSystem: "staging"`. The Copy activities would fail at runtime with "filesystem not found". | Added `staging` to the provisioned container list. |
 | 2 | `infrastructure/scripts/smoke_test.sh` | Only checked 6 of the 8 (now 9) provisioned containers — missing `feature-store` and `eventhubs-capture` (and now `staging`). A smoke test that doesn't check every provisioned container can pass while part of the landing zone is silently missing. | Added checks for `feature-store`, `eventhubs-capture`, and `staging`. |
 
+
+---
+
+## Appendix: Embedded Documentation from docs/
+
+Full content of this phase's docs/ deliverables, embedded here so this plan file is self-contained.
+
+### `docs/end_to_end_guide.md`
+
+# End-to-End Operational Guide
+## Real-Time Fraud Detection Platform
+
+> **Scope:** Complete walkthrough from local prerequisites to live streaming inference with automated daily MLOps — every command, config value, and environment variable you need.
+
+---
+
+## Table of Contents
+
+1. [Prerequisites & Local Setup](#1-prerequisites--local-setup)
+2. [Phase 0 — Infrastructure Deployment](#2-phase-0--infrastructure-deployment)
+3. [Phase 1 — Databricks Workspace Setup](#3-phase-1--databricks-workspace-setup)
+4. [Phase 1 — Batch Data Ingestion & Baseline Model](#4-phase-1--batch-data-ingestion--baseline-model)
+5. [Phase 2 — Streaming Pipeline](#5-phase-2--streaming-pipeline)
+6. [Phase 3 — Feature Store](#6-phase-3--feature-store)
+7. [Phase 4 — Hybrid ML Model Training & Serving](#7-phase-4--hybrid-ml-model-training--serving)
+8. [Phase 5 — Decision Engine & Case Workflow Deployment](#8-phase-5--decision-engine--case-workflow-deployment)
+9. [Phase 6 — MLOps Loop (Drift & Retraining)](#9-phase-6--mlops-loop-drift--retraining)
+10. [Phase 7 — Governance, Security & Hardening](#10-phase-7--governance-security--hardening)
+11. [End-to-End Smoke Test](#11-end-to-end-smoke-test)
+12. [Troubleshooting Reference](#12-troubleshooting-reference)
+13. [Quick Reference: Resource Names](#13-quick-reference-resource-names)
+
+---
+
+## 1. Prerequisites & Local Setup
+
+### 1.1 Required Accounts & Subscriptions
+
+| Requirement | Detail |
+|---|---|
+| **Azure Free Trial** | [azure.microsoft.com/free](https://azure.microsoft.com/en-us/free/) — $200 credit, 30 days |
+| **Azure Subscription** | Verify with `az account list` — must show an active subscription |
+| **GitHub Account** | To push the repo and enable CI/CD Actions |
+| **Kaggle Account** | To download the IEEE-CIS Fraud Detection dataset |
+
+### 1.2 Install Local Tooling
+
+```powershell
+# Azure CLI
+winget install Microsoft.AzureCLI
+
+# Databricks CLI
+pip install databricks-cli
+
+# Azure Functions Core Tools v4
+winget install Microsoft.AzureFunctionsCoreTools
+
+# Python 3.11 (project target runtime)
+winget install Python.Python.3.11
+
+# Git
+winget install Git.Git
+```
+
+**Verify:**
+```powershell
+az --version          # Expect: 2.60+
+databricks --version  # Expect: 0.18+
+func --version        # Expect: 4.x
+python --version      # Expect: 3.11.x
+```
+
+### 1.3 Clone the Repository
+
+```powershell
+git clone https://github.com/<your-org>/fraud-detection-platform.git
+cd "fraud-detection-platform"
+```
+
+### 1.4 Login to Azure
+
+```powershell
+az login
+az account set --subscription "YOUR-SUBSCRIPTION-ID"
+az account show --query "{Name:name, ID:id, State:state}"
+```
+
+### 1.5 Download the Dataset
+
+1. Go to [kaggle.com/c/ieee-fraud-detection/data](https://www.kaggle.com/c/ieee-fraud-detection/data)
+2. Download `train_transaction.csv` and `train_identity.csv`
+3. Place them in:
+
+```
+Project-2-Real-time-fraudlent detection/
+└── data/
+    ├── train_transaction.csv   (590,540 rows)
+    └── train_identity.csv      (144,233 rows)
+```
+
+> **Note:** `data/` is in `.gitignore`. Dataset files never get committed.
+
+---
+
+## 2. Phase 0 — Infrastructure Deployment
+
+### 2.1 Configure Deployment Parameters
+
+Edit `infrastructure/modules/parameters/dev.parameters.json`:
+
+```json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environment":      { "value": "dev" },
+    "location":         { "value": "centralindia" },
+    "ownerEmail":       { "value": "YOUR-EMAIL@example.com" },
+    "tenantId":         { "value": "YOUR-TENANT-ID" },
+    "deployerObjectId": { "value": "YOUR-OBJECT-ID" }
+  }
+}
+```
+
+**Get your IDs:**
+```powershell
+# Tenant ID
+az account show --query tenantId -o tsv
+
+# Your AAD Object ID (the deployer — you)
+az ad signed-in-user show --query id -o tsv
+```
+
+### 2.2 Deploy All Azure Resources via Terraform
+
+One-time bootstrap of the remote state storage account (skip if already done):
+
+```powershell
+cd infrastructure/bootstrap
+terraform init
+terraform apply -var="environment=dev"
+# copy the printed backend_config_snippet into ../backend-dev.conf
+```
+
+Then deploy everything:
+
+```powershell
+cd infrastructure
+terraform init -backend-config=backend-dev.conf
+$env:TF_VAR_sql_admin_password = "YOUR-STRONG-PASSWORD"
+terraform plan  -var-file=environments/dev.tfvars
+terraform apply -var-file=environments/dev.tfvars
+```
+
+**Expected time:** ~12–18 minutes.
+
+**Resources provisioned:**
+
+| Resource | Name | Purpose |
+|---|---|---|
+| Resource Group | `rg-fraud-detection-dev` | Container for all resources |
+| Key Vault | `kv-fraud-dev` | Secrets & PII salt |
+| ADLS Gen2 | `stfraudlakedev` | Delta Lake (8 containers) |
+| Databricks Workspace | `dbw-fraud-dev` | PySpark, MLflow |
+| Event Hubs Namespace | `ehns-fraud-dev` | Streaming ingestion (4 partitions) |
+| Azure SQL Serverless | `sql-fraud-dev` | Case management DB |
+| Service Bus | `sbns-fraud-dev` | Decision fan-out (3 subscriptions) |
+| App Configuration | `appcs-fraud-dev` | Live threshold management |
+| Cosmos DB Gremlin | `cosmos-fraud-dev` | Graph features |
+| Log Analytics | `log-fraud-dev` | Centralised monitoring |
+
+### 2.3 Populate Key Vault Secrets
+
+```powershell
+$KV = "kv-fraud-dev"
+
+# Event Hubs connection string
+# Azure Portal → Event Hubs Namespace → Shared Access Policies → Copy Connection String
+az keyvault secret set --vault-name $KV --name "eventhub-conn-str" `
+  --value "Endpoint=sb://ehns-fraud-dev.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=..."
+
+# Service Bus connection string
+az keyvault secret set --vault-name $KV --name "servicebus-conn-str" `
+  --value "Endpoint=sb://sbns-fraud-dev.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=..."
+
+# Azure SQL admin password (same as set via TF_VAR_sql_admin_password during Terraform deploy)
+az keyvault secret set --vault-name $KV --name "sql-admin-password-dev" --value "YOUR-STRONG-PASSWORD"
+
+# PII hashing salt (generate 32 random chars)
+$SALT = -join ((65..90)+(97..122)+(48..57) | Get-Random -Count 32 | % {[char]$_})
+az keyvault secret set --vault-name $KV --name "pii-hash-salt" --value $SALT
+
+# Storage access key (for Databricks cluster config during Free Trial)
+$STORAGE_KEY = az storage account keys list --account-name stfraudlakedev --query '[0].value' -o tsv
+az keyvault secret set --vault-name $KV --name "storage-access-key" --value $STORAGE_KEY
+```
+
+### 2.4 Run Phase 0 Smoke Test
+
+```bash
+bash infrastructure/scripts/smoke_test.sh dev
+```
+
+**Expected output:**
+```
+==========================================
+Phase 0 Smoke Test — Environment: dev
+==========================================
+✅ PASS: Resource group exists
+✅ PASS: Key Vault exists
+✅ PASS: Key Vault soft-delete enabled
+✅ PASS: Placeholder secrets exist
+✅ PASS: Storage account exists
+✅ PASS: Hierarchical namespace enabled
+✅ PASS: Container 'bronze' exists
+✅ PASS: Databricks workspace exists
+==========================================
+Results: 8 passed, 0 failed
+✅ Phase 0 smoke test PASSED
+```
+
+---
+
+## 3. Phase 1 — Databricks Workspace Setup
+
+### 3.1 Configure Databricks CLI
+
+```powershell
+# Get workspace URL: Azure Portal → Databricks Workspace → Overview → URL
+databricks configure --token
+# Prompt 1: Databricks Host → https://adb-XXXXXXXXXX.XX.azuredatabricks.net
+# Prompt 2: Token → Databricks UI → User Settings → Developer → Access Tokens → Generate New Token
+```
+
+### 3.2 Create Unity Catalog Schemas
+
+Open **Databricks UI → SQL Editor** and run:
+
+```sql
+-- From: databricks/workspace-setup/create_catalog_schemas.sql
+CREATE CATALOG IF NOT EXISTS fraud_detection_dev
+  COMMENT 'Fraud Detection Platform — Development Environment';
+
+USE CATALOG fraud_detection_dev;
+
+CREATE SCHEMA IF NOT EXISTS bronze    COMMENT 'Raw, append-only data';
+CREATE SCHEMA IF NOT EXISTS silver    COMMENT 'Cleaned, deduplicated, quality-gated data';
+CREATE SCHEMA IF NOT EXISTS gold      COMMENT 'Business-ready aggregations and feature store';
+CREATE SCHEMA IF NOT EXISTS quarantine COMMENT 'Rejected rows from quality gates';
+CREATE SCHEMA IF NOT EXISTS reference COMMENT 'Merchant categories, FX rates, risk tiers';
+
+SHOW SCHEMAS IN fraud_detection_dev;
+```
+
+> **Important:** Unity Catalog requires the 14-day Premium trial that begins on workspace creation day. Run this SQL within the first 14 days. After trial expiry, use the Hive Metastore fallback commands at the bottom of `create_catalog_schemas.sql`.
+
+### 3.3 Link Databricks Secret Scope to Key Vault
+
+```bash
+bash databricks/workspace-setup/secret_scope_setup.sh dev
+```
+
+**Verify:**
+```bash
+databricks secrets list-scopes
+databricks secrets list --scope kv-fraud
+# Expected secrets: eventhub-conn-str, servicebus-conn-str, pii-hash-salt, sql-admin-password-dev, storage-access-key
+```
+
+### 3.4 Configure ADLS Gen2 Access on the Cluster
+
+When creating a Databricks cluster, add these **Spark Config** properties (under Advanced Options):
+
+```
+spark.hadoop.fs.azure.account.key.stfraudlakedev.dfs.core.windows.net  {{secrets/kv-fraud/storage-access-key}}
+```
+
+> **Free Trial note:** This uses the Storage Account Access Key from Key Vault — the cheapest auth method requiring no Service Principal setup.
+
+---
+
+## 4. Phase 1 — Batch Data Ingestion & Baseline Model
+
+### 4.1 Upload Dataset to ADLS Gen2 Raw Container
+
+```powershell
+$STORAGE = "stfraudlakedev"
+
+az storage fs file upload `
+  --source "data/train_transaction.csv" `
+  --file-system "raw" --path "ieee-cis/train_transaction.csv" `
+  --account-name $STORAGE --auth-mode login
+
+az storage fs file upload `
+  --source "data/train_identity.csv" `
+  --file-system "raw" --path "ieee-cis/train_identity.csv" `
+  --account-name $STORAGE --auth-mode login
+```
+
+### 4.2 Run Medallion Bronze → Silver → Gold Notebooks
+
+In Databricks Workspace, open and run these **in order** on a `Standard_DS3_v2` single-node cluster:
+
+| Order | Notebook | Output | Runtime |
+|---|---|---|---|
+| 1 | `databricks/notebooks/bronze/batch_ingest_ieee_cis.py` | `bronze.transactions` | ~5 min |
+| 2 | `databricks/notebooks/quality/data_quality_gates.py` | `quarantine.rejected_transactions` | ~3 min |
+| 3 | `databricks/notebooks/silver/silver_transformation.py` | `silver.transactions` (PII hashed) | ~8 min |
+| 4 | `databricks/notebooks/gold/gold_aggregation.py` | `gold.transaction_aggregates` | ~5 min |
+
+**Validate Silver row count:**
+```sql
+-- Databricks SQL Editor
+SELECT COUNT(*) FROM fraud_detection_dev.silver.transactions;
+-- Expected: ~550,000+ (some rows quarantined by quality gates)
+```
+
+### 4.3 Train the XGBoost Baseline Model
+
+```powershell
+python ml/training/train_xgboost_baseline.py
+```
+
+**Expected output:**
+```
+Baseline XGBoost Training Complete.
+  Validation PR-AUC : 0.847
+  Validation ROC-AUC: 0.931
+  Model saved: models/baseline/xgb_baseline.pkl
+```
+
+> PR-AUC ≥ 0.80 is the quality gate. If below, check your data split and class weighting.
+
+### 4.4 Run the Full Ensemble Training Pipeline
+
+```powershell
+# Runs all 9 steps: data load → quality gate → temporal split → SMOTE → XGBoost (Optuna) →
+# Autoencoder → Isolation Forest → Calibration → Meta-Learner → MLflow registration
+python ml/pipelines/training_pipeline.py
+```
+
+---
+
+## 5. Phase 2 — Streaming Pipeline
+
+### 5.1 Verify Event Hub Partition Configuration
+
+```powershell
+az eventhubs eventhub show `
+  --resource-group rg-fraud-detection-dev `
+  --namespace-name ehns-fraud-dev `
+  --name eh-transactions `
+  --query "{Partitions:partitionCount, Status:status}"
+# Expected: {"Partitions": 4, "Status": "Active"}
+```
+
+### 5.2 Configure & Start the Transaction Producer
+
+```powershell
+cd "producers/transaction_producer"
+pip install -r requirements.txt
+```
+
+Create `producers/transaction_producer/.env`:
+```env
+EVENTHUB_PRODUCER_CONN_STR=Endpoint=sb://ehns-fraud-dev.servicebus.windows.net/;SharedAccessKeyName=eh-producer-policy;SharedAccessKey=YOUR_KEY
+EVENTHUB_NAME=eh-transactions
+DATASET_PATH=../../data/train_transaction.csv
+SPEED_MULTIPLIER=100
+BATCH_SIZE=100
+MAX_EVENTS=10000
+LOG_INTERVAL=1000
+VALIDATE_SCHEMA=true
+```
+
+```powershell
+python producer.py
+```
+
+**Expected output:**
+```
+[Producer] Starting IEEE-CIS replay at 100x speed
+[Producer] Batch 1 sent: 100 events (txn_000001 → txn_000100)
+[Producer] Batch 2 sent: 100 events (txn_000101 → txn_000200)
+...
+[Producer] 10,000 events sent. Throughput: ~2,800 events/sec
+```
+
+### 5.3 Start the Structured Streaming Consumer
+
+In Databricks, create a **Job Cluster** (not interactive) with `autotermination_minutes: 0`, then run:
+
+`databricks/notebooks/bronze/streaming_consumer.py`
+
+This runs continuously, reading from Event Hubs and applying `MERGE INTO bronze.raw_events` with checkpoint recovery on restart.
+
+---
+
+## 6. Phase 3 — Feature Store
+
+Run all feature engineering notebooks **in order**:
+
+| Order | Notebook | Output Table | Runtime |
+|---|---|---|---|
+| 1 | `notebooks/features/compute_card_velocity_features.py` | `gold.feature_card_velocity` | ~10 min |
+| 2 | `notebooks/features/compute_customer_velocity_features.py` | `gold.feature_customer_velocity` | ~8 min |
+| 3 | `notebooks/features/compute_geo_velocity_features.py` | `gold.feature_geo_velocity` | ~12 min |
+| 4 | `notebooks/features/compute_graph_features.py` | `gold.feature_graph_network` | ~15 min |
+| 5 | `notebooks/features/build_baseline_features.py` | `gold.train_feature_snapshot` | ~5 min |
+
+**Validate:**
+```sql
+SELECT COUNT(*) FROM fraud_detection_dev.gold.train_feature_snapshot;
+-- Expected: ~500,000+ rows with 43 feature columns
+```
+
+---
+
+## 7. Phase 4 — Hybrid ML Model Training & Serving
+
+### 7.1 Run Full Ensemble Training Pipeline
+
+In Databricks, run `ml/pipelines/training_pipeline.py`.
+
+**Trains in sequence:** XGBoost (Optuna 30 trials) → PyTorch Autoencoder (30 epochs) → Isolation Forest → 3× Isotonic Calibrators → Stacking Meta-Learner.
+
+**MLflow Experiment:** `/Shared/fraud_detection_training`
+
+The pipeline raises `ValueError` and aborts if test PR-AUC < 0.80 (quality gate).
+
+### 7.2 Register the Champion Model in MLflow
+
+After training, in a Databricks notebook:
+
+```python
+import mlflow
+client = mlflow.tracking.MlflowClient()
+
+# Find the run ID in: Experiments → fraud_detection_training → best test_pr_auc run
+RUN_ID = "PASTE-BEST-RUN-ID-FROM-MLFLOW-UI"
+
+model_ver = client.create_model_version(
+    name="fraud-ensemble-champion",
+    source=f"runs:/{RUN_ID}/ensemble_model",
+    run_id=RUN_ID
+)
+client.transition_model_version_stage(
+    name="fraud-ensemble-champion",
+    version=model_ver.version,
+    stage="Production",
+    archive_existing_versions=True
+)
+print(f"Champion registered: version={model_ver.version}, stage=Production")
+```
+
+### 7.3 Deploy Azure ML Online Endpoint
+
+```powershell
+az ml online-endpoint create `
+  --name "fraud-scoring-endpoint" `
+  --resource-group rg-fraud-detection-dev `
+  --workspace-name "mlw-fraud-dev"
+
+az ml online-deployment create `
+  --name "blue" `
+  --endpoint-name "fraud-scoring-endpoint" `
+  --file ml/serving/deployment_spec.yaml
+```
+
+**Test the scoring endpoint:**
+```powershell
+az ml online-endpoint invoke `
+  --name "fraud-scoring-endpoint" `
+  --request-file ml/tests/sample_request.json
+```
+
+**Expected response:**
+```json
+{
+  "transaction_id": "txn_sample_001",
+  "fraud_probability": 0.0423,
+  "component_scores": {"xgboost": 0.038, "autoencoder": 0.041, "isolation_forest": 0.052},
+  "top_risk_factors": [],
+  "scoring_mode": "full",
+  "model_version": "a3b2c1d4",
+  "latency_ms": 18.4
+}
+```
+
+---
+
+## 8. Phase 5 — Decision Engine & Case Workflow Deployment
+
+### 8.1 Deploy Azure SQL Schema
+
+```powershell
+$SQL = "sql-fraud-dev.database.windows.net"
+$DB  = "sqldb-fraud-cases-dev"
+$USR = "sqladmin"
+
+# Run all 5 migrations in order
+@("V001","V002","V003","V004","V005") | ForEach-Object {
+    $file = Get-Item "database/migrations/${_}__*.sql"
+    sqlcmd -S $SQL -d $DB -U $USR -P "YOUR-PASSWORD" -i $file.FullName
+    Write-Host "✅ Migration $_ applied"
+}
+```
+
+### 8.2 Set Decision Thresholds in App Configuration
+
+```powershell
+$AC = "appcs-fraud-dev"
+az appconfig kv set --name $AC --key "FraudEngine:ApproveMaxThreshold" --value "0.10" --yes
+az appconfig kv set --name $AC --key "FraudEngine:StepUpMaxThreshold"  --value "0.60" --yes
+az appconfig kv set --name $AC --key "FraudEngine:BlockMinThreshold"   --value "0.90" --yes
+
+# Verify
+az appconfig kv list --name $AC --output table
+```
+
+### 8.3 Configure Function App Settings
+
+```powershell
+$FUNC = "func-decision-engine-dev"
+$RG   = "rg-fraud-detection-dev"
+$AC_CONN = az appconfig credential list --name appcs-fraud-dev --query '[0].connectionString' -o tsv
+
+az functionapp config appsettings set `
+  --name $FUNC --resource-group $RG `
+  --settings `
+    "SERVICE_BUS_CONN_STR=@Microsoft.KeyVault(VaultName=kv-fraud-dev;SecretName=servicebus-conn-str)" `
+    "APP_CONFIG_CONN_STR=$AC_CONN" `
+    "SERVICE_BUS_TOPIC_NAME=sb-topic-fraud-events" `
+    "ADLS_STORAGE_ACCOUNT_NAME=stfraudlakedev" `
+    "FRAUD_ENV=dev"
+```
+
+### 8.4 Deploy the Functions
+
+```powershell
+# Decision Engine
+cd functions/decision_engine
+func azure functionapp publish func-decision-engine-dev --python
+
+# Audit Logger (same Function App, different trigger)
+cd ../audit_logger
+func azure functionapp publish func-decision-engine-dev --python
+```
+
+### 8.5 Test the Decision Engine
+
+```powershell
+$FUNC_KEY = az functionapp keys list `
+  --name func-decision-engine-dev `
+  --resource-group rg-fraud-detection-dev `
+  --query "functionKeys.default" -o tsv
+
+$URL = "https://func-decision-engine-dev.azurewebsites.net/api/evaluate-decision?code=$FUNC_KEY"
+
+# Low-risk → approve
+Invoke-RestMethod -Uri $URL -Method POST -ContentType "application/json" -Body '{
+  "transaction_id": "test-low-001",
+  "customer_id": "cust-abc",
+  "card_id": "card-xyz",
+  "amount": 25.00,
+  "fraud_probability": 0.04,
+  "model_version": "test"
+}'
+# Expected: {"decision_action": "approve", "fraud_probability": 0.04}
+
+# High-risk → block
+Invoke-RestMethod -Uri $URL -Method POST -ContentType "application/json" -Body '{
+  "transaction_id": "test-high-001",
+  "customer_id": "cust-abc",
+  "card_id": "card-xyz",
+  "amount": 9800.00,
+  "fraud_probability": 0.95,
+  "model_version": "test"
+}'
+# Expected: {"decision_action": "block", "fraud_probability": 0.95}
+```
+
+---
+
+## 9. Phase 6 — MLOps Loop (Drift & Retraining)
+
+### 9.1 Create the Daily MLOps Databricks Job
+
+```powershell
+databricks jobs create --json-file databricks/jobs/mlops_drift_and_retrain_job.json
+
+# Verify
+databricks jobs list --output table
+# Expected: mlops_daily_drift_and_retrain — Schedule: 0 0 6 * * ? (06:00 IST)
+```
+
+This creates a 4-task sequential daily job:
+
+| Task | Notebook | Purpose |
+|---|---|---|
+| 1 | `ingest_chargeback_feedback` | MERGE-based label reconciliation (30-day maturation) |
+| 2 | `track_model_kpis` | Daily TP/FP/FN/TN + precision/recall/FPR aggregation |
+| 3 | `run_daily_drift_check` | PSI/KS/JSD evaluation → auto-triggers retraining on critical drift |
+| 4 | `shadow_scoring_batch` | Champion vs Challenger side-by-side scoring |
+
+### 9.2 Trigger a Manual First Run
+
+```powershell
+$JOB_ID = databricks jobs list --output json | ConvertFrom-Json | `
+  Where-Object { $_.settings.name -eq "mlops_daily_drift_and_retrain" } | `
+  Select-Object -ExpandProperty job_id
+
+databricks runs submit --job-id $JOB_ID
+databricks runs get --run-id $(databricks runs list --limit 1 --output json | ConvertFrom-Json).runs[0].run_id
+```
+
+### 9.3 Monitor Drift History
+
+```sql
+-- Databricks SQL Editor
+SELECT check_date, feature_drift_status, max_psi, mean_jsd,
+       critical_features, warning_features, concept_drift_status
+FROM fraud_detection_dev.gold.drift_monitoring_history
+ORDER BY check_date DESC
+LIMIT 10;
+```
+
+### 9.4 Monitor KPI Trends
+
+```sql
+SELECT kpi_date, model_version,
+       true_positives, false_positives, false_negatives, true_negatives,
+       ROUND(precision, 4) AS precision,
+       ROUND(recall, 4) AS recall,
+       ROUND(false_positive_rate, 4) AS fpr
+FROM fraud_detection_dev.gold.model_performance_kpis
+ORDER BY kpi_date DESC
+LIMIT 14;
+```
+
+### 9.5 Deploy Rollback Sentinel
+
+Add this as a recurring Databricks Job (every 6 hours) using a single-node cluster:
+
+```python
+# Job Notebook: scripts/automated_rollback_sentinel.py
+# Schedule: 0 0 */6 * * ? (every 6 hours)
+```
+
+---
+
+## 10. Phase 7 — Governance, Security & Hardening
+
+### 10.1 Apply Unity Catalog Column Masking
+
+In Databricks SQL Editor, run the entire script:
+`databricks/governance/apply_data_masking_policies.sql`
+
+Key operations:
+- Creates `mask_ip_address()`, `mask_device_id()`, `mask_email()` masking functions
+- Applies column-level masks to `silver.transactions`
+- Grants role-based access to `fraud-analysts`, `data-engineers`, `ml-engineers`
+
+**Verify masking works:**
+```sql
+-- Connect as a user in the 'fraud-analysts' group — should see masked IPs
+SELECT ip_address, device_id FROM fraud_detection_dev.silver.transactions LIMIT 5;
+-- Expected: "192.168.xxx.xxx" and "a1b2****" (not raw values)
+```
+
+### 10.2 Create Entra ID Groups
+
+```powershell
+az ad group create --display-name "fraud-analysts"       --mail-nickname "fraud-analysts"
+az ad group create --display-name "data-engineers"       --mail-nickname "data-engineers"
+az ad group create --display-name "ml-engineers"         --mail-nickname "ml-engineers"
+az ad group create --display-name "compliance-officers"  --mail-nickname "compliance-officers"
+az ad group create --display-name "platform-admins"      --mail-nickname "platform-admins"
+```
+
+### 10.3 Apply RBAC Assignments
+
+The Databricks → Storage/Key Vault role assignments are already applied automatically as
+part of the `terraform apply` in §2.2 (the RBAC module is wired into the root config, unlike
+the old Bicep version where it had to be deployed as a separate manual step). The Decision
+Function and Logic App identities aren't provisioned by this Terraform config, though, so
+their role assignments need their principal IDs supplied once those resources exist elsewhere:
+
+```powershell
+# Get the Managed Identity Object IDs of your Function App and Logic App
+$FUNC_MI = az functionapp identity show `
+  --name func-decision-engine-dev --resource-group rg-fraud-detection-dev `
+  --query principalId -o tsv
+
+$LOGICAPP_MI = az logic-app identity show `
+  --name logic-stepup-workflow-dev --resource-group rg-fraud-detection-dev `
+  --query principalId -o tsv
+
+cd infrastructure
+terraform apply -var-file=environments/dev.tfvars `
+  -var="decision_function_principal_id=$FUNC_MI" `
+  -var="logic_app_principal_id=$LOGICAPP_MI" `
+  -target=module.rbac_assignments
+```
+
+### 10.4 Enable CI/CD Security Scanning
+
+Push the repository to GitHub to activate the security scan workflow on every PR:
+
+```powershell
+git remote add origin https://github.com/<your-org>/fraud-detection-platform.git
+git push -u origin main
+```
+
+Every pull request now auto-runs `.github/workflows/security-scan.yml`:
+- **TruffleHog** — Verified secret leak detection
+- **Checkov** — Terraform IaC misconfiguration scanning
+- **Bandit** — Python SAST (hardcoded credentials, insecure patterns)
+- **pip-audit** — Dependency CVE scanning
+
+### 10.5 Rotate Key Vault Secrets
+
+```powershell
+$env:KEY_VAULT_NAME = "kv-fraud-dev"
+python scripts/rotate_keyvault_secrets.py
+# Rotates: db-admin-password-dev, pii-hash-salt, sql-admin-password-dev
+```
+
+### 10.6 Run the Full Platform Verification
+
+```bash
+bash scripts/verify_platform_end_to_end.sh
+```
+
+---
+
+## 11. End-to-End Smoke Test
+
+Run this sequence to validate every layer is connected:
+
+```powershell
+# 1. Send 100 streaming transactions
+cd producers/transaction_producer
+$env:MAX_EVENTS = "100"; python producer.py
+
+# 2. Verify they landed in Bronze Delta
+#    Databricks SQL: SELECT COUNT(*) FROM fraud_detection_dev.bronze.raw_events
+#    WHERE event_date = current_date()
+
+# 3. Test low-risk → approve
+$URL = "https://func-decision-engine-dev.azurewebsites.net/api/evaluate-decision?code=$FUNC_KEY"
+Invoke-RestMethod -Uri $URL -Method POST -ContentType "application/json" -Body `
+  '{"transaction_id":"smoke-001","customer_id":"c1","card_id":"k1","amount":25.00,"fraud_probability":0.04,"model_version":"test"}'
+
+# 4. Test high-risk → block
+Invoke-RestMethod -Uri $URL -Method POST -ContentType "application/json" -Body `
+  '{"transaction_id":"smoke-002","customer_id":"c1","card_id":"k1","amount":9999.00,"fraud_probability":0.95,"model_version":"test"}'
+
+# 5. Verify audit record in ADLS Gold container
+az storage fs file list `
+  --file-system gold --path "audit_logs" `
+  --account-name stfraudlakedev --auth-mode login
+
+# 6. Verify Service Bus received the event
+az servicebus topic show `
+  --resource-group rg-fraud-detection-dev `
+  --namespace-name sbns-fraud-dev `
+  --name sb-topic-fraud-events `
+  --query "countDetails"
+
+# 7. Verify fraud case in SQL
+#    sqlcmd -S sql-fraud-dev.database.windows.net -d sqldb-fraud-cases-dev -U sqladmin
+#    SELECT TOP 5 transaction_id, decision_action, case_status, created_at
+#    FROM fraud_cases ORDER BY created_at DESC;
+```
+
+---
+
+## 12. Troubleshooting Reference
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| `terraform apply` fails with "QuotaExceeded" | Free Trial vCPU limits | Use `Standard_DS2_v2` (2 vCPU) instead of DS3_v2 wherever a VM size is set |
+| Databricks cluster fails to start | vCPU quota exhausted | Use Single Node cluster: `num_workers: 0`, `cluster.profile: singleNode` |
+| `pii_masking.py` raises `RuntimeError` on secret fetch | Key Vault unreachable | Set `FRAUD_ENV=dev` in Databricks cluster environment variables |
+| Decision Engine returns `approve_fallback` | Required fields missing from request body | Ensure payload includes: `transaction_id`, `customer_id`, `card_id`, `amount`, `fraud_probability` |
+| `track_model_performance_kpis.py` produces 0 rows | No reconciled labels yet | Run `ingest_chargeback_feedback.py` first to seed `gold.reconciled_labeled_transactions` |
+| MLflow shows runs in `RUNNING` state indefinitely | Optuna nested runs not closed | Ensure `train_supervised.py` uses `with mlflow.start_run(nested=True):` context manager |
+| `score.py` logs `model_version: "unknown"` | MLflow model not tagged | Re-register the model ensuring `run_id` is populated in MLflow model version metadata |
+| Service Bus messages not reaching `sub-audit-log` | Subscription filter misconfigured | Azure Portal → Service Bus → Topic → Subscriptions → sub-audit-log → Filters |
+| Shadow scoring exits `NO_CHALLENGER` | No model in Staging stage | Trigger a retraining run — champion_challenger_gate.py promotes to Staging on pass |
+| `drift_detector.py` returns `NO_DATA` for all features | Feature snapshot table empty | Run Phase 3 feature notebooks to populate `gold.train_feature_snapshot` |
+| CI fails TruffleHog scan | Credentials committed to git history | `git log --all --full-history -- "**/*.json"` to find commit; use `git filter-repo` to purge |
+| Autoencoder reconstruction error is all zeros | Autoencoder not trained | Check `ae_model.pt` artifact exists and was trained on legitimate transactions only |
+| KPI table accumulates duplicate rows per day | Using `.mode("append")` | Ensure production `track_model_performance_kpis.py` (with MERGE INTO fix) is deployed |
+
+---
+
+## 13. Quick Reference: Resource Names
+
+| Category | Resource | Name |
+|---|---|---|
+| Azure | Resource Group | `rg-fraud-detection-dev` |
+| Azure | Key Vault | `kv-fraud-dev` |
+| Azure | ADLS Gen2 | `stfraudlakedev` |
+| Azure | Databricks Workspace | `dbw-fraud-dev` |
+| Azure | Event Hubs Namespace | `ehns-fraud-dev` |
+| Azure | Event Hub | `eh-transactions` |
+| Azure | Azure SQL Server | `sql-fraud-dev` |
+| Azure | SQL Database | `sqldb-fraud-cases-dev` |
+| Azure | Service Bus Namespace | `sbns-fraud-dev` |
+| Azure | Service Bus Topic | `sb-topic-fraud-events` |
+| Azure | App Configuration | `appcs-fraud-dev` |
+| Azure | Function App | `func-decision-engine-dev` |
+| Databricks | Unity Catalog | `fraud_detection_dev` |
+| Databricks | Secret Scope | `kv-fraud` |
+| MLflow | Registered Model | `fraud-ensemble-champion` |
+| MLflow | Experiment | `/Shared/fraud_detection_training` |
+| Key Vault Secrets | Event Hub conn | `eventhub-conn-str` |
+| Key Vault Secrets | Service Bus conn | `servicebus-conn-str` |
+| Key Vault Secrets | PII salt | `pii-hash-salt` |
+| Key Vault Secrets | SQL password | `sql-admin-password-dev` |
+| Key Vault Secrets | Storage key | `storage-access-key` |
+| Environment Variables | PII env flag | `FRAUD_ENV=dev` |
+
+---
+
+### `docs/execution-log/00-overview.md`
+
+# Execution Log — First Real Deployment & Validation Pass
+
+This is a record of the first time this repository's code was actually run
+against real Azure infrastructure, real data, and a real Databricks cluster
+— as opposed to just being written. Before this session, per the repo's own
+`TODO.md`: zero Azure resources existed, zero models were trained, and the
+local test suite didn't even run.
+
+Read this file first — it's the index and the quick-reference for resource
+names, links, and the full bug list. Each phase has its own file with exact
+commands and step-by-step manual instructions.
+
+## Contents
+
+| File | Covers |
+|---|---|
+| [01-local-environment.md](01-local-environment.md) | Fixing the local dev environment (PySpark, packages, pytest) |
+| [02-infrastructure.md](02-infrastructure.md) | Deploying Azure infra via Terraform, GitHub Actions CI secrets |
+| [03-data-landing.md](03-data-landing.md) | Databricks workspace setup, Kaggle data, Bronze→Silver→Gold, baseline model |
+| [04-streaming.md](04-streaming.md) | Event Hubs, the transaction producer, streaming ingestion, late-arrival calibration |
+| [05-feature-engineering.md](05-feature-engineering.md) | Feature store materialization, GraphFrames, Cosmos DB graph |
+| [06-model-ensemble.md](06-model-ensemble.md) | Full hybrid ensemble training, MLflow packaging, scoring path, circuit breaker |
+| [07-decision-engine.md](07-decision-engine.md) | Phase 5: Service Bus/SQL/App Config deployment, Azure Functions, a real audit-logger bug found and fixed, DLQ replay |
+| [08-mlops-loop.md](08-mlops-loop.md) | Phase 6: drift monitoring, retraining, Champion/Challenger gates + promotion, shadow scoring, a real rollback |
+| [09-governance-security.md](09-governance-security.md) | Phase 7: Unity Catalog masking, PII hashing, RBAC, 4-scan security pipeline, chaos tests, platform verification, a real Key Vault/SQL password rotation |
+| [10-followup-fixes.md](10-followup-fixes.md) | Follow-up: Logic Apps deployed for real, chaos test_03 latency bug fixed at the root cause, UC masking re-enabled via a view |
+
+## Environment quick-reference
+
+| Thing | Value |
+|---|---|
+| Azure subscription | `800df714-bea7-4580-8606-22b36ebee0fa` ("Azure subscription 1") |
+| Azure tenant | `ce93da9d-d7b7-4db6-a625-8642417af178` |
+| Resource group | `rg-fraud-detection-dev` |
+| Terraform state resource group | `rg-tfstate-fraud-dev` |
+| Terraform state storage account | `sttfstatedevmvm94i` |
+| Storage account (data lake) | `stfraudlakedev` |
+| Key Vault | `kv-fraud-dev-4th9` (name has a random suffix — see `02-infrastructure.md`) |
+| Databricks workspace | https://adb-7405619338601349.9.azuredatabricks.net |
+| Databricks cluster | `0830-043110-gk2nx3tn` (`batch-etl-dev`, `Standard_D4s_v5`, single-node) |
+| Unity Catalog catalog | `fraud_detection_dev` |
+| Cosmos DB account | `cosmos-fraud-dev-604t` |
+| Event Hubs namespace / hub | `ehns-fraud-dev` / `eh-transactions` |
+| Azure SQL server | `sql-fraud-dev.database.windows.net` |
+| App Configuration | `appcs-fraud-dev` |
+| CI service principal | `sp-fraud-detection-dev-ci` (app ID `1226f24c-778b-4478-b186-2b56895b6c30`) |
+| GitHub repo | `Aniket2555/Fraud-detection-platform` |
+
+## MLflow experiments & registered models
+
+| Name | Link |
+|---|---|
+| `/fraud-detection-baseline` | https://adb-7405619338601349.9.azuredatabricks.net/ml/experiments/3667937819264216 |
+| `/fraud-detection-phase4-ensemble` | https://adb-7405619338601349.9.azuredatabricks.net/ml/experiments/1166970400119118 |
+| Registered model `fraud_detection_dev.gold.fraud_xgboost_baseline` | https://adb-7405619338601349.9.azuredatabricks.net/explore/data/models/fraud_detection_dev/gold/fraud_xgboost_baseline |
+
+## Cluster is not always running
+
+The Databricks cluster auto-terminates after a period of inactivity (last
+set to 60 minutes). If a link above 404s or a `databricks clusters get`
+call shows `TERMINATED`, start it again — see "Starting/using the cluster
+manually" in `03-data-landing.md`. Starting takes 3-7 minutes.
+
+## Full bug list (40 real defects found and fixed)
+
+Every one of these was found by actually running the code — not by
+inspection. All are fixed in the working tree as of this log; none are
+committed to git yet (see "What's not done" below).
+
+### Infrastructure / Terraform
+1. `scripts/store_eventhub_secrets.sh` — hardcoded Key Vault name; the real vault has a random suffix
+2. `databricks/workspace-setup/secret_scope_setup.sh` — same hardcoded-name bug (fixed pre-emptively)
+3. `infrastructure/modules/key-vault/main.tf` — Key Vault names are globally unique across all Azure tenants; `kv-fraud-dev` collided with someone else's vault → added a random suffix
+4. `infrastructure/modules/cosmos-db/main.tf` — same global-uniqueness collision → added a random suffix
+5. `infrastructure/modules/rbac-assignments/main.tf` — 6 role assignments were unconditional even for identities (Decision Function, Logic App, Databricks storage) that don't exist yet → guarded with `count`
+6. `infrastructure/modules/diagnostic-settings/main.tf` + `infrastructure/main.tf` — hardcoded log/metric categories that Storage accounts and Databricks workspaces don't support → made toggleable
+
+### Phase 1 — Bronze/Silver/Gold + baseline model
+7. `databricks/notebooks/silver/transform_ieee_cis_to_silver.py` — called `run_bronze_quality_gate()`, which existed but was never importable → moved into `databricks/src/quality/quality_gate.py`
+8. `pyproject.toml` — `requires-python = ">=3.11"` but Databricks Runtime 14.3 ships Python 3.10.12 → relaxed to `>=3.10`
+9. `databricks/notebooks/bronze/ingest_ieee_cis_transactions.py` + `ingest_ieee_cis_identity.py` — Auto Loader missing required `cloudFiles.schemaLocation`
+10. Databricks' auto-provisioned "workspace default" storage credential (`dbw_fraud_dev`) is hard-restricted to its own managed path — registered a new storage credential + 3 external locations for our own storage account
+11. Auto Loader `.load()` was given a literal file path instead of a directory + `pathGlobFilter`
+12. `cloudFiles.badRecordsPath` isn't a real Auto Loader option key — it's `badRecordsPath` (no `cloudFiles.` prefix)
+13. Silver notebook joined on `TransactionID` after the identity side had already been renamed to snake_case — the join silently matched nothing
+14. `_rescued_data` column collision after the bronze join (both sides had it)
+15. `mlflow.set_experiment("fraud-detection-baseline")` — bare name invalid on Databricks; needs an absolute workspace path
+16. **The most serious one:** `unix_timestamp()` in `databricks/src/transformations/cleaning.py` couldn't parse the ISO8601 `REFERENCE_TIMESTAMP` string, returning `NULL` — silently collapsed every transaction's `event_date` into one bucket. Would have produced a Gold layer with 1 row instead of 182, and any date-derived feature would have been quietly wrong.
+17. `ml/training/train_xgboost_baseline.py` — `from utils.feature_engineering import ...` (bare import, only works as a standalone script) → fixed to the proper package path
+18. `.toPandas()` on all ~470 silver columns caused an OOM kill on the cluster → select only needed columns + downcast to float32 before collecting
+19. `mlflow.xgboost.log_model()` was missing the signature Unity Catalog requires, and used a bare (non-three-level) registered model name
+20. Missing `mlflow[databricks]` package extras, needed specifically for Unity Catalog model registry access
+
+### Phase 2 — Streaming
+21. `producers/transaction_producer/config.py` — `time_anchor` was hardcoded to a fixed past date instead of defaulting to "now", making any live-replay late-arrival measurement meaningless
+
+### Phase 3 — Feature engineering, GraphFrames, Cosmos DB
+22. **Critical data-corruption bug:** `databricks/notebooks/silver/stream_silver_from_bronze.py` was merging the live Event Hub dataset into the *same* `silver.transactions` table as the Phase 1 IEEE-CIS baseline data — two completely incompatible schemas. Fixed by routing to a new `silver.streaming_transactions` table.
+23. `compute_behavioral_baselines.py` — same wrong-table bug, plus `event_date` doesn't exist on the streaming table (used `event_time_ts` instead)
+24. `compute_merchant_risk.py` — same wrong-table bug, plus `is_fraud == 1` doesn't match a boolean column (fixed to `== True`)
+25. `compute_graph_metrics.py` — same wrong-table bug
+26. GraphFrames' `connectedComponents()` needs `sparkContext.setCheckpointDir()`, which bypasses Unity Catalog entirely and doesn't work with UC Volumes or DBFS root (disabled on this workspace) → used local disk (valid since the cluster is single-node)
+27. `stream_edges_to_cosmos.py` — wrong secret scope name (`fraud-secrets` instead of `kv-fraud`)
+28. `gremlin_python`'s client runs its own event loop, which conflicts with the notebook kernel's already-running one → needed `nest_asyncio`
+29. Cosmos DB's Gremlin API only supports GraphSON 2.0; the client defaults to 3.0 — connects, then gets silently closed by the server on the first real request
+30. `upsert_edge()`'s three Gremlin submissions were fire-and-forget (no `.all().result()`) — a real race condition (edge creation could run before its vertices existed) and silently swallowed errors
+
+### Phase 4 — Hybrid ensemble & serving
+31. `databricks/notebooks/features/materialize_feature_store.py` — entire body was commented out (already flagged in `TODO.md`) and referenced the wrong table — implemented for real
+32. `ml/training/data_preparation.py` — referenced `gold.reconciled_labeled_transactions`, a table never produced anywhere in the pipeline → uses `silver.streaming_transactions` directly
+33. `ml/training/data_preparation.py` — split data by calendar month (assumed a multi-month dataset) — nonsensical for a compressed-timeframe streaming replay → replaced with a 70/15/15 chronological split
+34. `ml/training/train_supervised.py` — `early_stopping_rounds` passed to `.fit()`, but the installed XGBoost (3.x) requires it as a constructor parameter (the code's own comment claimed the opposite) — fixed in both the Optuna objective and the final model fit; also removed the now-invalid `use_label_encoder` param
+35. `train_xgboost_supervised()`'s Optuna trials call `mlflow.start_run(nested=True, ...)`, which needs an active parent run and a set experiment — neither existed by default; fixed at the call site (driver script), not inside the reusable function
+36. `ml/serving/score.py` — bare imports (`from shap_explainability import ...`, `from circuit_breaker import ...`) → fixed to package paths
+
+## What's not done / not committed
+
+- **None of these fixes are committed to git yet.** Everything above is a
+  working-tree change. Run `git status` / `git diff` to review before
+  committing.
+- Azure ML Managed Online Endpoint deployment (Phase 4.6) — deliberately
+  out of scope; this Free Trial architecture excludes Azure ML entirely
+  (see `docs/phase0/upgrade_to_production.md`). Everything up to that
+  deployment step (the model, its packaging, the exact scoring/fallback/
+  circuit-breaker logic) is built and verified.
+- Phase 5 onward (Decision Engine, MLOps loop, governance/hardening) —
+  not started this session.
+- The `1226f24c-...` CI service principal's client secret was shown once
+  during creation and is in the GitHub Actions secrets — it is not
+  recorded anywhere else. If lost, reset it with
+  `az ad sp credential reset --id 1226f24c-778b-4478-b186-2b56895b6c30`
+  and update the `AZURE_CLIENT_SECRET` GitHub secret.
+
+---
+
+### `docs/execution-log/01-local-environment.md`
+
+# 01 — Local Environment
+
+**Starting state:** a `.venv` existed with only `pandas`, `pyspark`,
+`scikit-learn` installed. Every PySpark-based test failed with
+`Py4JJavaError: SocketTimeoutException: Accept timed out`. `pytest`
+couldn't even collect one test module. Result: 5 passing / 12 failing per
+the repo's own `TODO.md`.
+
+**End state:** all local packages installed, PySpark genuinely working,
+21/21 relevant unit tests passing.
+
+## What was actually wrong (3 separate issues, all needed together)
+
+1. **Missing `HADOOP_HOME`/`winutils.exe`.** PySpark on Windows needs
+   Hadoop's native Windows shims even for purely local (non-HDFS)
+   operation.
+2. **`PYSPARK_PYTHON` not set correctly.** Without it, PySpark's worker
+   subprocesses fall back to whatever `python` resolves to on `PATH` —
+   on this machine that was the Windows Store app-execution-alias stub,
+   which does nothing and exits, so the JVM's accept() call just times
+   out waiting for a worker that never starts. Setting `PYSPARK_PYTHON`
+   to the venv's `python.exe` fixes it — but the path **must** use
+   Windows-style backslashes (`D:\code file\...\python.exe`), not the
+   Git-Bash mangled form (`/d/code file/...`) — Java's `ProcessBuilder`
+   splits on whitespace when it doesn't recognize the path format, and
+   the project directory has a space in it (`Project-2-Real-time-fraudlent
+   detection`).
+3. **`pytest` couldn't resolve `producers/transaction_producer/test_
+   event_mapper.py`'s bare `import event_mapper`** — that directory has
+   an `__init__.py`, so pytest's default import mode walks up to `producers/`
+   as the insertion point, not `producers/transaction_producer/` itself.
+
+## Commands run
+
+```powershell
+# Install winutils.exe + hadoop.dll (Hadoop 3.3.5 build — close enough to
+# PySpark 3.5.4's bundled 3.3.4 for the Windows filesystem shims it needs)
+mkdir C:\hadoop\bin
+curl -fsSL -o C:\hadoop\bin\winutils.exe "https://github.com/cdarlint/winutils/raw/master/hadoop-3.3.5/bin/winutils.exe"
+curl -fsSL -o C:\hadoop\bin\hadoop.dll "https://github.com/cdarlint/winutils/raw/master/hadoop-3.3.5/bin/hadoop.dll"
+
+# Set persistent User environment variables (PowerShell)
+[Environment]::SetEnvironmentVariable("HADOOP_HOME", "C:\hadoop", "User")
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", "$userPath;C:\hadoop\bin", "User")
+[Environment]::SetEnvironmentVariable("PYSPARK_PYTHON", "D:\code file\Project-2-Real-time-fraudlent detection\.venv\Scripts\python.exe", "User")
+[Environment]::SetEnvironmentVariable("PYSPARK_DRIVER_PYTHON", "D:\code file\Project-2-Real-time-fraudlent detection\.venv\Scripts\python.exe", "User")
+```
+
+```bash
+# Install all Python packages (~50 packages: xgboost, torch, mlflow,
+# pydeequ, all azure-* SDKs, shap, jsonschema, etc.)
+.venv/Scripts/python.exe -m pip install -r requirements.txt
+```
+
+`pyproject.toml` fix — added under `[tool.setuptools.package-data]`:
+```toml
+[tool.pytest.ini_options]
+pythonpath = ["producers/transaction_producer"]
+```
+
+## Verifying it worked
+
+```bash
+export HADOOP_HOME="C:\\hadoop"
+export PATH="$PATH:/c/hadoop/bin"
+.venv/Scripts/python.exe -m pytest databricks/tests ml/tests producers/transaction_producer/test_event_mapper.py -q
+# -> 21 passed
+```
+
+Note: because these were set as persistent **User** environment variables,
+new terminal sessions pick them up automatically — you don't need to
+re-export `HADOOP_HOME`/`PYSPARK_PYTHON` by hand unless you're in a shell
+that predates when they were set.
+
+## To reproduce this from scratch
+
+1. Download `winutils.exe` + `hadoop.dll` for a Hadoop 3.3.x build (the
+   [cdarlint/winutils](https://github.com/cdarlint/winutils) repo hosts
+   prebuilt Windows binaries) into some stable folder, e.g. `C:\hadoop\bin`.
+2. Set `HADOOP_HOME` to that folder's parent and add `\bin` to `PATH`.
+3. Set `PYSPARK_PYTHON` / `PYSPARK_DRIVER_PYTHON` to the exact
+   `.venv\Scripts\python.exe` path, using backslashes.
+4. `pip install -r requirements.txt`.
+5. Add the `pythonpath` entry to `pyproject.toml` if it's not already
+   there (it is now, as of this session).
+6. Run `pytest` as above to confirm.
+
+`tests/chaos/` will still fail locally — those tests hit a live deployed
+Azure Function endpoint and are expected to fail until Phase 5 is deployed.
+
+---
+
+### `docs/execution-log/02-infrastructure.md`
+
+# 02 — Infrastructure (Terraform + CI secrets)
+
+**Starting state:** zero Azure resources existed anywhere. `terraform apply`
+had never been run. `dev.tfvars` had placeholder values
+(`your-email@example.com`, `YOUR-OBJECT-ID`).
+
+**End state:** 64 resources live in `rg-fraud-detection-dev`; CI service
+principal created; all 11 GitHub Actions secrets set.
+
+## Tools installed
+
+```powershell
+winget install -e --id Microsoft.AzureCLI
+winget install -e --id GitHub.cli
+```
+
+Terraform (v1.15.8) was already installed.
+
+## Windows/Git-Bash gotcha you'll hit repeatedly
+
+Git Bash mangles two kinds of arguments unless handled explicitly:
+
+- **Paths starting with `/`** (e.g. `/subscriptions/...` for `az` `--ids`
+  or REST URLs) get auto-converted to Windows paths. Fix: prefix the
+  command with `MSYS_NO_PATHCONV=1`.
+- **`PATH` entries in `C:/...` form** get corrupted because Git Bash's `:`
+  separator collides with the drive letter's colon. Always use the Unix
+  mount form: `/c/Program Files/...`, not `C:/Program Files/...`.
+
+## Logging in
+
+```bash
+# Azure CLI — interactive browser login, must be run by a human in their
+# own terminal (an agent can't complete a browser OAuth flow)
+az login
+
+# GitHub CLI — same constraint
+gh auth login
+```
+
+## Terraform: bootstrap the remote state backend (one-time)
+
+```bash
+cd infrastructure/bootstrap
+terraform init
+terraform plan -var="environment=dev" -out=bootstrap.tfplan
+terraform apply bootstrap.tfplan
+# Note the printed storage_account_name (was: sttfstatedevmvm94i)
+```
+
+Fill in `infrastructure/backend-dev.conf` (gitignored) with the printed
+values:
+```
+resource_group_name  = "rg-tfstate-fraud-dev"
+storage_account_name = "sttfstatedevmvm94i"
+container_name        = "tfstate"
+key                   = "fraud-detection-dev.tfstate"
+```
+
+## Terraform: fill in `dev.tfvars`
+
+```bash
+az ad signed-in-user show --query id -o tsv   # your Azure AD object ID
+```
+
+Edit `infrastructure/environments/dev.tfvars`:
+```hcl
+owner_email        = "<your-email>"
+deployer_object_id = "<object id from above>"
+```
+
+## Terraform: generate the SQL admin password
+
+Never commit this. It's supplied via env var at apply time.
+```bash
+.venv/Scripts/python.exe -c "
+import secrets, string
+alphabet = string.ascii_letters + string.digits
+pw = ''.join(secrets.choice(alphabet) for _ in range(24)) + '!' + secrets.choice(string.digits) + '#'
+print(pw)
+" > infrastructure/.sql_admin_password.local   # gitignored
+export TF_VAR_sql_admin_password="$(cat infrastructure/.sql_admin_password.local)"
+```
+
+## Terraform: init, plan, apply
+
+```bash
+export PATH="$PATH:/c/Program Files/Microsoft SDKs/Azure/CLI2/wbin"
+cd infrastructure
+terraform init -input=false -backend-config=backend-dev.conf
+terraform plan -input=false -var-file=environments/dev.tfvars -out=dev.tfplan
+terraform apply -input=false dev.tfplan
+```
+
+This creates 59 resources on the first clean apply. **Real, ongoing cost:
+~$20-25/month base** (Event Hubs Standard + Service Bus Standard), plus
+usage-based charges only when Databricks clusters actually run or
+Cosmos DB/SQL are queried (both serverless/auto-pause).
+
+### Bugs hit during apply, and their fixes
+
+All already fixed in the working tree; documented here so you understand
+why the code looks the way it does.
+
+**1. App Configuration key writes hung for 45 minutes, then failed.**
+Root cause: writing App Config key-values requires the "App Configuration
+Data Owner" data-plane RBAC role — not covered by subscription Owner or
+any ARM-level permission. This is a genuine Azure quirk (unlike Key Vault,
+App Config key-values aren't governed by resource-level RBAC alone). Fix
+(one-time, per environment, after the store exists):
+```bash
+az role assignment create \
+  --assignee <your-object-id> \
+  --role "App Configuration Data Owner" \
+  --scope "/subscriptions/<sub>/resourceGroups/rg-fraud-detection-dev/providers/Microsoft.AppConfiguration/configurationStores/appcs-fraud-dev"
+```
+If `az role assignment create` itself fails with a `MissingSubscription`
+error (a real CLI bug we hit), use `az rest` directly instead:
+```bash
+GUID=$(python -c "import uuid; print(uuid.uuid4())")
+ROLE_ID=$(az role definition list --name "App Configuration Data Owner" --query "[0].id" -o tsv)
+SCOPE="/subscriptions/<sub>/resourceGroups/rg-fraud-detection-dev/providers/Microsoft.AppConfiguration/configurationStores/appcs-fraud-dev"
+az rest --method put \
+  --url "https://management.azure.com${SCOPE}/providers/Microsoft.Authorization/roleAssignments/${GUID}?api-version=2022-04-01" \
+  --body "{\"properties\":{\"roleDefinitionId\":\"${ROLE_ID}\",\"principalId\":\"<your-object-id>\",\"principalType\":\"User\"}}"
+```
+
+**2. Key Vault and Cosmos DB names collided globally.** Both resource
+types have DNS-style globally-unique names across *all* Azure tenants —
+`kv-fraud-dev` and `cosmos-fraud-dev` were already taken by someone else.
+Fixed in `infrastructure/modules/key-vault/main.tf` and
+`infrastructure/modules/cosmos-db/main.tf` by adding a `random_string`
+suffix (same pattern the bootstrap config already used for the tfstate
+storage account). Real names now: `kv-fraud-dev-4th9`, `cosmos-fraud-dev-604t`.
+
+**3. `rbac-assignments` module tried to grant roles to identities that
+don't exist yet** (Decision Function, Logic App — both Phase 5; and
+Databricks's own storage identity, which doesn't populate on
+Unity-Catalog-enabled workspaces). Fixed with `count` guards in
+`infrastructure/modules/rbac-assignments/main.tf` — each assignment is
+skipped when its principal ID is null/empty.
+
+**4. `diagnostic-settings` module hardcoded log/metric categories that
+Storage accounts and Databricks workspaces don't support.** Fixed by
+making both toggleable (`enable_logs`, `enable_metrics` variables) in
+`infrastructure/modules/diagnostic-settings/main.tf`, with the calling
+`for_each` in `infrastructure/main.tf` setting the right flags per
+resource type.
+
+### A cosmetic, permanent, safe-to-ignore diff
+
+`terraform plan` will forever show a 4-resource diff (the storage
+account's `network_rules` block + 3 diagnostic settings) — a known
+azurerm provider quirk where Azure's API doesn't echo back certain
+"default/allow" settings on refresh. Re-applying doesn't change real
+behavior. Don't chase this.
+
+## CI service principal + GitHub secrets
+
+```bash
+# Create SP scoped to just this project's resource group
+az ad sp create-for-rbac --name "sp-fraud-detection-dev-ci" \
+  --role Contributor \
+  --scopes "/subscriptions/<sub>/resourceGroups/rg-fraud-detection-dev"
+# (if the role-assignment part fails with the same MissingSubscription
+#  bug as above, the SP itself is still created — reset its credentials
+#  instead of recreating: az ad sp credential reset --id <appId>)
+```
+
+The SP also needs 3 narrow data-plane roles, for the same reasons as the
+manual grants above — CI runs `terraform apply` too and needs to
+actually write to these services:
+```bash
+# Repeat the az rest pattern from above for each of:
+#   - Contributor on the resource group (control plane)
+#   - Key Vault Administrator on the vault
+#   - App Configuration Data Owner on the app config store
+#   - Storage Blob Data Contributor on the *tfstate* storage account
+```
+
+Set the 11 GitHub Actions secrets (`infra-deploy.yml` reads these):
+```bash
+gh secret set AZURE_SUBSCRIPTION_ID --repo Aniket2555/Fraud-detection-platform --body "<sub>"
+gh secret set AZURE_TENANT_ID --repo Aniket2555/Fraud-detection-platform --body "<tenant>"
+gh secret set AZURE_CLIENT_ID --repo Aniket2555/Fraud-detection-platform --body "<sp app id>"
+gh secret set AZURE_CLIENT_SECRET --repo Aniket2555/Fraud-detection-platform --body "<sp secret>"
+gh secret set TFSTATE_RESOURCE_GROUP --repo Aniket2555/Fraud-detection-platform --body "rg-tfstate-fraud-dev"
+gh secret set TFSTATE_STORAGE_ACCOUNT --repo Aniket2555/Fraud-detection-platform --body "sttfstatedevmvm94i"
+gh secret set OWNER_EMAIL --repo Aniket2555/Fraud-detection-platform --body "<email>"
+gh secret set DEPLOYER_OBJECT_ID --repo Aniket2555/Fraud-detection-platform --body "<your object id, NOT the SP's>"
+gh secret set SQL_ADMIN_PASSWORD --repo Aniket2555/Fraud-detection-platform --body "$(cat infrastructure/.sql_admin_password.local)"
+gh secret set DECISION_FUNCTION_PRINCIPAL_ID --repo Aniket2555/Fraud-detection-platform --body ""   # empty until Phase 5
+gh secret set LOGIC_APP_PRINCIPAL_ID --repo Aniket2555/Fraud-detection-platform --body ""            # empty until Phase 5
+```
+
+**Why `DEPLOYER_OBJECT_ID` is your personal ID, not the SP's:** the
+key-vault module's `deployer_object_id` variable drives a single tracked
+`azurerm_role_assignment` resource. If CI used a different value than
+your local `dev.tfvars`, every `terraform apply` (local vs. CI) would
+fight over that resource's `principal_id` (which is `ForceNew` —
+Terraform would destroy-and-recreate it, revoking access, every time).
+Keeping both the same avoids drift. The SP's own Key Vault access was
+granted separately, out-of-band, as one of the 3 data-plane roles above.
+
+```bash
+gh secret list --repo Aniket2555/Fraud-detection-platform   # verify
+```
+
+## Verifying the deployment
+
+```bash
+terraform plan -input=false -var-file=environments/dev.tfvars
+# should show only the cosmetic network_rules/diagnostics diff (see above)
+```
+
+---
+
+### `docs/phase0/free_trial_budget_guide.md`
+
+# Azure Free Trial Budget & Cost Management Guide
+
+> [!IMPORTANT]
+> The Azure Free Trial grants **$200 credit for 30 days**. This guide documents essential rules to keep overall project spend under $100 while completing all 7 implementation phases.
+
+---
+
+## Top 5 Cost Drivers
+
+| Resource | Uncontrolled Cost | Mitigated Cost | Action Required |
+|---|---|---|---|
+| **Databricks Compute** | $15–30/day (if left running) | $1–3/day | Set 20-min auto-termination on all cluster policies |
+| **Azure ML Endpoints** | $3–5/day continuous | $0 (in Phase 0–2) | Deferred to Phase 3; use Databricks MLflow locally |
+| **Private Endpoints** | $7.20/month per endpoint | $0 | Use public access + Service Firewalls for Free Trial |
+| **Azure SQL Database** | $15–30/month provisioned | ~$0/month | Serverless SKU (`GP_S_Gen5_1`) with 60-min auto-pause |
+| **Cosmos DB** | $25+/month provisioned RU | <$2/month | Serverless SKU or strict 400 RU/s cap |
+
+---
+
+## Daily Budget Checklist
+
+1. **Before Starting Work:**
+   - Verify cluster auto-termination is set to **20 minutes**.
+   - Use single-node clusters (`Standard_DS3_v2`, 0 workers) for initial notebook runs.
+
+2. **After Finishing Work:**
+   - Manually terminate all active Databricks clusters.
+   - Verify no jobs are left running in an infinite loop.
+
+3. **Monitoring Azure Portal:**
+   - Check **Cost Management → Cost Analysis** daily.
+   - Ensure spending stays under **$5/day**.
+
+---
+
+## Budget Alerts Setup
+
+Run the following Azure CLI commands to configure budget threshold alerts:
+
+```bash
+# Set a $50 budget alert
+az consumption budget create \
+  --budget-name "FreeTrialBudget" \
+  --amount 100 \
+  --time-grain Monthly \
+  --start-date $(date +%Y-%m-01) \
+  --end-date $(date -d "+1 year" +%Y-%m-01) \
+  --resource-group "rg-fraud-detection-dev"
+```
+
+---
+
+### `docs/phase0/upgrade_to_production.md`
+
+# Phase 0 — Production Upgrade Runbook
+
+This document describes the architectural and configuration changes required when transitioning this platform from the **Azure Free Trial** setup to an enterprise-grade **Pay-As-You-Go / Production** environment.
+
+---
+
+## Upgrade Steps Matrix
+
+| Component | Free Trial Architecture | Production Upgrade Target | Actions Required |
+|---|---|---|---|
+| **Networking** | Public endpoints + Service Firewalls | VNet Injection + Private Endpoints | Add a `vnet` Terraform module (6 subnets, 9 Private DNS zones) and set `enable_private_endpoints = true` in `environments/prod.tfvars` — `infrastructure/modules/private-endpoints` already exists and just needs a real `vnet_id`/`private_endpoint_subnet_id` |
+| **Databricks Tier** | Premium Trial / Standard | Premium (Permanent) | Enable Unity Catalog across dev/staging/prod workspaces with Metastore admin binding |
+| **Databricks Compute** | Single-Node `Standard_DS3_v2` | Multi-Node Autoscaling (`Standard_DS4_v2` / `Standard_E8ds_v5`) | Update cluster policies to permit 2–8 workers; enable Photon engine for batch ETL |
+| **Storage (ADLS)** | Standard LRS | Standard ZRS (Zone Redundant) | Re-provision ADLS Gen2 with ZRS redundancy and 30-day soft delete |
+| **Key Vault** | Standard SKU | Premium SKU (HSM-backed) | Upgrade SKU for HSM key protection and enable purge protection |
+| **Model Serving** | Databricks MLflow PyFunc | Azure ML Managed Online Endpoints | Add an `azureml-workspace` Terraform module (`azurerm_machine_learning_workspace`) + Azure ML Online Endpoints (`Standard_DS3_v2` autoscale pool) — no such module exists yet in either the old Bicep or the new Terraform config |
+| **Azure SQL** | Serverless `GP_S_Gen5_1` (Auto-pause) | Provisioned General Purpose / Business Critical | Disable auto-pause, enable ZRS, and configure Read Replicas |
+| **Service Bus** | Standard Tier | Premium Tier | Upgrade Service Bus to Premium Tier for VNet integration and dedicated capacity |
+| **App Configuration**| Free Tier (1,000 req/day) | Standard Tier | Upgrade to Standard SKU for unlimited requests and private endpoints |
+| **CI/CD Security** | Client Secrets | OIDC Federated Credentials | Configure Azure AD Workload Identity Federation for GitHub Actions workflows |
+| **Environment Parity**| Single `dev` environment | `dev`, `staging`, `prod` isolated subscriptions | Deploy multi-subscription RG hierarchy with parameter files for staging/prod |
+
+---
+

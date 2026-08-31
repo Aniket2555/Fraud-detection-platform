@@ -1054,3 +1054,483 @@ The mermaid diagram in §5.8 describes a much richer flow than what's actually i
 This fix pass deliberately did **not** fabricate that subsystem. Building it would mean inventing an entire new feature (external OTP delivery, a public callback API with its own auth, an analyst roster schema and UI) with no way to validate any of it without live Azure infrastructure — which risks shipping something that looks complete but has never actually been exercised. Instead, `workflow_stepup_auth.json`'s existing behavior — wait 5 minutes, then unconditionally escalate to manual review — is the conservative, safe fallback the diagram itself specifies for the timeout branch (`D -->|Timeout| G`), and is now honestly labelled as such (see the `notes` field added to `Escalate_If_Timeout`'s call in fix #9 above) rather than silently presented as the full flow. Building the real OTP/analyst-assignment subsystem is a genuine follow-up project, not a bug fix.
 
 Separately: no Terraform module (`infrastructure/modules/*`) actually deploys `azurerm_logic_app_workflow` or the Service Bus/SQL API connections these workflows depend on — the workflow JSON files exist as artifacts only. A `logic-app` module is referenced as planned in this phase's file tree but was never created.
+
+---
+
+## Appendix: Embedded Documentation from docs/
+
+Full content of this phase's docs/ deliverables, embedded here so this plan file is self-contained.
+
+### `docs/execution-log/07-decision-engine.md`
+
+# 07 — Phase 5: Decision Engine, Case Management, Compliance Audit
+
+**Starting state:** Phase 5's Terraform modules (`service-bus`, `azure-sql`,
+`app-configuration`) and application code (3 Azure Functions, 5 SQL
+migrations, 2 stored procedures, 2 Logic App workflow JSON files) already
+existed in the repo from an earlier design/code-review pass — but nothing
+had ever been deployed or run. The plan document's own "Known Issues"
+section already listed a set of bugs found by code review and fixed in
+source; this session is the first time any of it touched real Azure
+infrastructure.
+
+**End state:** Service Bus topic + 3 subscriptions, Azure SQL Serverless
+with all 5 tables + 2 stored procedures, App Configuration with dynamic
+thresholds, and all 3 Azure Functions (Consumption plan) deployed and
+verified end-to-end against real infrastructure. One previously-undetected
+production bug was found and fixed (see below). Logic Apps were **not**
+deployed this session — see "What's not done."
+
+## What was already live vs. newly deployed
+
+The Service Bus namespace, Azure SQL server/database, and App
+Configuration store were actually already provisioned during
+`02-infrastructure.md`'s original `terraform apply` (they were wired into
+`infrastructure/main.tf` from the start). This session's infra work was:
+
+1. Running the 5 SQL migrations + 2 stored procedures for real (nothing
+   had created the tables yet)
+2. Building brand-new Terraform for Function App hosting (didn't exist
+   anywhere — the plan's own file tree never included it)
+3. Deploying the 3 Functions' code
+
+## New Terraform: Function App hosting
+
+No module provisioned the actual compute to run
+`functions/decision_engine`, `functions/audit_logger`,
+`functions/dlq_monitor` — the plan's file tree only ever specified the
+function *code*. Added `infrastructure/modules/function-app/`:
+- One shared Storage Account (Consumption-plan Functions need one for
+  trigger/lease state; shared across all 3 to minimize footprint)
+- One Linux Consumption Service Plan (`Y1` — free for the first 1M
+  executions/month)
+- 3 `azurerm_linux_function_app` resources, each with a system-assigned
+  managed identity
+- A `Storage Blob Data Contributor` role assignment scoping
+  `audit_logger`'s identity to the data lake (it writes compliance
+  records via `ManagedIdentityCredential`, not a connection string)
+
+Also added a `primary_read_connection_string` output to the
+`app-configuration` module (App Config didn't previously expose one) and
+a `dlq_replay_connection_string` output to `service-bus` (send+listen,
+no manage — narrower than the namespace root key) for the DLQ replay
+tooling.
+
+```bash
+cd infrastructure
+terraform plan -input=false -var-file=environments/dev.tfvars -out=dev.tfplan
+terraform apply -input=false dev.tfplan
+```
+
+## Running the SQL migrations
+
+```bash
+# Firewall: serverless SQL only allows Azure services + explicitly
+# allow-listed IPs by default. Temporarily added, removed when done:
+az sql server firewall-rule create --resource-group rg-fraud-detection-dev \
+  --server sql-fraud-dev --name AllowMyDevIP \
+  --start-ip-address <your-ip> --end-ip-address <your-ip>
+
+pip install pymssql   # bundles FreeTDS -- no separate ODBC driver install needed on Windows
+```
+
+Ran `database/migrations/V001` through `V005`, then
+`database/stored_procedures/sp_upsert_fraud_case.sql` and
+`sp_update_case_status.sql`, via a small pymssql runner script (splits
+each file on `GO` batch separators, executes sequentially).
+
+**Serverless auto-pause gotcha:** the first connection attempt failed
+with SQL error 40613 ("database is not currently available... resuming")
+— `GP_S_Gen5_1` had auto-paused from zero activity. Retried with
+exponential backoff; resumed within ~45 seconds.
+
+### Verifying the SQL layer for real (not just "tables exist")
+
+Directly exercised both stored procedures against the live database:
+- Called `sp_upsert_fraud_case` twice for the same `transaction_id` with
+  different scores — confirmed identical `case_id` returned both times,
+  first call logged `CASE_CREATED` in `case_events`, second logged
+  `MODEL_SCORE_UPDATED`, and `fraud_cases` reflected the second call's
+  values (idempotent MERGE + full field refresh on match, both correct)
+- Called `sp_update_case_status` with a note containing `"quotes"` and a
+  `\backslash` — confirmed the resulting `event_data` JSON parses
+  correctly (the `STRING_ESCAPE` fix works)
+- Attempted an insert with an invalid `decision_action` value — confirmed
+  the `CHECK` constraint correctly rejects it
+
+## Deploying the 3 Azure Functions
+
+This took several iterations to get right on Windows:
+
+1. **`az functionapp deployment source config-zip` doesn't build Python
+   dependencies.** On current-generation Linux Consumption Function Apps,
+   this command uploads the zip straight to blob storage and points
+   `WEBSITE_RUN_FROM_PACKAGE` at it — it does **not** invoke Oryx/Kudu to
+   run `pip install -r requirements.txt`, even with
+   `SCM_DO_BUILD_DURING_DEPLOYMENT=true` set. Functions with third-party
+   imports (`azure-servicebus`, `azure-identity`, etc.) failed to index
+   at all.
+2. **Fix:** pre-installed dependencies into the deployment package
+   manually, targeting the Linux runtime rather than the local Windows
+   Python:
+   ```bash
+   pip install --platform manylinux2014_x86_64 --only-binary=:all: \
+     --python-version 3.11 \
+     --target build_dir/.python_packages/lib/site-packages \
+     -r functions/<name>/requirements.txt
+   ```
+   then zipped `build_dir` (source + `.python_packages/`) and deployed
+   that. `azure-functions-core-tools` (the normal path for this) couldn't
+   be installed via `npm` in this environment (pre-existing, unrelated
+   npm auth issue) — this was the workaround.
+3. **`az functionapp function list` is unreliable immediately after
+   deploy** — it reads a cached ARM view that lags the real function
+   host by a minute or more. Verified indexing instead via the function
+   app's own admin API (`GET /admin/functions?code=<masterKey>`), which
+   reflects the live host state immediately.
+
+```bash
+# Per function:
+az functionapp deployment source config-zip \
+  --resource-group rg-fraud-detection-dev --name <func-app-name> \
+  --src <built-zip-with-dependencies>
+```
+
+## The real bug: audit_logger wrote 0-byte compliance records
+
+This is the one genuine production defect found this session (not
+already flagged in the plan's own code-review pass).
+
+**Symptom:** `decision_engine` correctly published events for every
+non-approve decision; `audit_logger`'s Service Bus trigger correctly
+fired; but every single delivery attempt failed, and after
+`max_delivery_count` (10) retries, every message dead-lettered with
+`MaxDeliveryCountExceeded`. The handful of files that did land in
+`gold/audit_logs/` were all exactly **0 bytes**.
+
+**Root cause:** `_persist_audit_record()` called
+`dir_client.create_file(file_name)` (which creates an empty file on ADLS
+Gen2) and then `file_client.upload_data(record_bytes, overwrite=False)`
+on that same, now-already-existing file. Confirmed by reproducing the
+exact write logic locally against the real storage account (using
+`AzureCliCredential` in place of the deployed `ManagedIdentityCredential`,
+same account, same code path):
+- `create_file()` then `upload_data(overwrite=False)` → the file "already
+  exists" (from the create moment before), write refused, 0 bytes remain
+- Removing the `create_file()` call and using `get_file_client()` instead
+  (no server-side creation) → `upload_data(overwrite=False)` internally
+  issues an `append_data` call assuming the path already exists, and
+  fails with `ResourceNotFoundError: PathNotFound` since it doesn't
+
+**Fix:** explicit existence check before writing, rather than relying on
+`upload_data(overwrite=...)` to double as both "create if absent" and a
+dedup signal:
+```python
+file_client = dir_client.get_file_client(file_name)
+try:
+    file_client.get_file_properties()
+    already_exists = True          # duplicate delivery -- skip
+except ResourceNotFoundError:
+    already_exists = False
+if not already_exists:
+    file_client.upload_data(record_bytes, overwrite=True)
+```
+Verified against real Service Bus traffic end-to-end after the fix: a
+fresh decision-engine call produced a real 514-byte JSON audit record
+with all expected fields (including the dynamic `threshold_config` used
+for that decision), consumed cleanly with zero dead-letters.
+
+## Replaying the stale dead-lettered messages
+
+6 messages had accumulated in `sub-audit-log`'s DLQ from testing against
+the broken code. Used `scripts/dlq_replay_handler.py` (already fixed for
+the `ServiceBusSubQueue.DEAD_LETTER` API per the plan's own known-issues
+list) to re-publish them:
+```bash
+export SERVICE_BUS_CONN_STR="<dlq-replay-rule connection string>"
+python scripts/dlq_replay_handler.py sub-audit-log
+```
+All 6 replayed messages were consumed cleanly by the fixed `audit_logger`
+— confirmed via file listing (500+ bytes each, not 0).
+
+## Verifying the Decision Engine against the checklist (§5.12 of the plan)
+
+| # | Check | Result |
+|---|---|---|
+| 7 | Decision Function < 15ms | Warm calls: 0.14–0.2ms internal latency. First call after a threshold-cache refresh: ~85ms (App Config round-trip). Cold container start (platform-level, not code): several hundred ms — outside the Function's own control. |
+| 8 | Score < 0.10 approves | `fraud_probability=0.05` → `200`, `approve`, no Service Bus publish |
+| 9 | Score > 0.90 blocks & publishes | `fraud_probability=0.95` → `403`, `block`, event published and consumed downstream |
+| 10 | Dynamic threshold change, no redeploy | Changed `FraudEngine:StepUpMaxThreshold` from `0.60` to `0.50` via `az appconfig kv set` — a call with `fraud_probability=0.55` correctly flipped from `step_up` to `manual_review` on the very next request, with zero code deployment. Reverted after confirming. |
+| 11 | Compliance audit logger fires | Confirmed working end-to-end after the bugfix above |
+| 12 | DLQ monitor detects dead-lettered messages | Manually dead-lettered a message, invoked `dlq_monitor` via its admin API (`POST /admin/functions/dlq_monitor`) — returned `202 Accepted`, and the DLQ message count was unchanged afterward (consistent with its documented peek-only behavior, which intentionally does not consume DLQ messages). **Could not directly verify the log content** — Linux Consumption Python apps don't expose classic Kudu log streaming/`LogFiles` VFS without an Application Insights resource wired in, which wasn't provisioned this session. |
+
+## What's not done
+
+- **Application Insights** was never provisioned — the Functions run
+  without centralized log aggregation. Structured `logging.info()` calls
+  exist throughout the code but currently only reach the platform's
+  ephemeral console capture, not a queryable store.
+- **Logic Apps** (`logic-apps/workflows/workflow_stepup_auth.json`,
+  `workflow_case_management.json`) were **not deployed**. No Terraform
+  module provisions `azurerm_logic_app_workflow` or the Service Bus/SQL
+  API connections they depend on — this was already an open gap flagged
+  in the plan document itself before this session started, and it
+  remains open. `sub-stepup-auth` and `sub-case-mgmt` currently have no
+  live consumer; messages will simply accumulate as active (undelivered)
+  until either a Logic App or a consuming Function is built and deployed.
+- The full OTP/analyst-assignment workflow described in the plan's
+  mermaid diagram (§5.8) was never implemented anywhere in the repo, by
+  the plan's own admission — this remains a genuine follow-up project,
+  not something this session addressed.
+- Case creation for `manual_review` decisions (via `sub-case-mgmt`) is
+  therefore not yet wired end-to-end in a live/deployed sense, even
+  though the SQL layer it would call (`sp_upsert_fraud_case`) is fully
+  verified and working.
+
+## To reproduce this from scratch
+
+1. Ensure `terraform apply` from `02-infrastructure.md` has run (creates
+   Service Bus, Azure SQL, App Configuration, and now also the 3
+   Function Apps + their hosting plan).
+2. Add a temporary SQL firewall rule for your IP, run the 5 migrations +
+   2 stored procedures via pymssql (or any SQL client), remove the
+   firewall rule when done.
+3. For each of the 3 functions: `pip install --platform
+   manylinux2014_x86_64 --only-binary=:all: --python-version 3.11
+   --target <dir>/.python_packages/lib/site-packages -r
+   functions/<name>/requirements.txt`, zip the function directory
+   (source + `.python_packages/`), deploy with `az functionapp
+   deployment source config-zip`.
+4. Verify each function is indexed via `GET
+   https://<app>.azurewebsites.net/admin/functions?code=<masterKey>`
+   (not the CLI's `function list`, which lags).
+5. Test the decision engine with `POST /api/evaluate-decision` across all
+   4 score bands; confirm Service Bus subscription message counts change
+   accordingly (`az servicebus topic subscription show ... --query
+   countDetails`).
+6. Change a threshold via `az appconfig kv set` and confirm a boundary
+   probability reclassifies within ~60 seconds (the cache TTL), no
+   redeploy.
+
+---
+
+### `docs/execution-log/10-followup-fixes.md`
+
+# 10 — Follow-up session: closing 3 previously-documented gaps
+
+**Starting state:** the platform was fully deployed and verified (Phases
+0-7), with three gaps left open on purpose and tracked in
+`docs/operational_readiness_signoff.md`: Logic Apps designed but never
+deployed, chaos `test_03` failing for a documented non-regression reason,
+and Unity Catalog PII masking reverted for a compute-version compatibility
+break. This session closed all three for real.
+
+## 1. Logic Apps: deployed for the first time
+
+`logic-apps/workflows/*.json` (Case Management, Step-Up Auth) existed as
+plain JSON but no Terraform module ever provisioned them
+(`infrastructure/variables.tf`'s own comment flagged this). Added
+`infrastructure/modules/logic-apps/`, which reads both JSON files via
+`jsondecode(file(...))` rather than duplicating their content into HCL, so
+the deployed workflow always matches what's committed.
+
+**Two real bugs found by actually deploying and triggering these:**
+
+1. **`depends_on` can't be a dynamic expression.** `for_each`-created
+   `azurerm_logic_app_action_custom` resources apply in parallel by
+   default, but the Logic Apps API rejects an action whose `runAfter`
+   target doesn't exist yet — `stepup_auth`'s 4-deep action chain
+   (`Parse_Message_JSON` → `Upsert_Case_Record` → `Wait_For_Customer_Response`
+   → `Escalate_If_Timeout`) failed with `InvalidTemplate` /
+   `contains non-existent action`. Terraform's `depends_on` only accepts a
+   fully static list — no `for` expressions, no `concat()` — so the fix
+   was switching from `for_each` to one explicitly-named resource per
+   action with a static `depends_on` chain (body still read dynamically
+   from the JSON file, only the resource addressing is static).
+2. **The workflow JSON's SQL dataset path used the wrong server
+   identifier.** Both workflows call
+   `/v2/datasets/@{encodeURIComponent('sql-fraud-dev')},.../procedures/...`
+   — the *short* SQL Server name. The SQL managed connector's `v2/datasets`
+   path segment is the actual TDS connection target, not a label, so
+   `'sql-fraud-dev'` alone isn't a resolvable hostname. First live test
+   failed with `Invalid connection settings / Not a valid data source`.
+   Fixed both JSON files to use the FQDN
+   (`sql-fraud-dev.database.windows.net`), matching the API connection's
+   own `server` parameter.
+
+**Also hit a real state/reality drift while doing this:** planning any
+change that touched `module.azure_sql` showed Terraform wanting to reset
+the live SQL admin password, because Phase 7's rotation
+(`scripts/rotate_keyvault_secrets.py`) updated the server directly via the
+ARM API, bypassing Terraform entirely — so Terraform's state still held
+the pre-rotation password. Resolved by re-reading the current password
+from Key Vault's `azure-sql-jdbc-url` secret into
+`infrastructure/.sql_admin_password.local` before applying, so the apply
+brought Terraform's state back in sync with reality instead of reverting
+the live server to a stale credential. This drift will recur on every
+future `terraform apply` for as long as password rotation happens outside
+Terraform — worth keeping in mind, not something this session could fix
+structurally.
+
+**Verified end-to-end for real:** called the live
+`POST /api/evaluate-decision` endpoint with a payload scored into the
+`step_up` band, confirmed both workflows' `Upsert_Case_Record` action
+completed with `code: OK` (the SQL managed connector round-trip only
+returns that on a successful stored-procedure execution) on a fresh,
+post-fix test message — not just on backlog messages that happened to
+predate the fix.
+
+## 2. Chaos `test_03`: fixed the real cause instead of loosening the test
+
+`docs/execution-log/09-governance-security.md` documented `test_03`
+(sequential p99 < 100ms) failing at p99=178.97ms for a "non-regression"
+reason: `functions/decision_engine/function_app.py`'s `_get_thresholds()`
+did a **synchronous, blocking** App Configuration call inline whenever its
+60-second cache TTL expired, and a 100-sequential-request test run
+legitimately spans more than 60 seconds of real network RTT — so 1-2 of
+the 100 requests blocked on a live App Config round-trip mid-run.
+
+That's a real latency bug, not just a test artifact: a hot request path
+has no business blocking on a periodic config refresh just because it's
+the unlucky request that noticed the cache was stale. Fixed with a
+stale-while-revalidate pattern — `_get_thresholds()` now kicks off the
+App Config refresh on a background daemon thread and immediately returns
+the (about-to-be-updated) cached snapshot, instead of blocking the
+request. Only the very first cold-start call (no cached value to serve
+yet) still blocks synchronously.
+
+Rebuilt the deployment package (`pip install --platform manylinux2014_x86_64
+--only-binary=:all: --python-version 3.11 --target
+.python_packages/lib/site-packages`, per `07-decision-engine.md`'s
+recipe) and redeployed via `az functionapp deployment source config-zip`.
+
+**Result, run against the live redeployed function:**
+
+```
+tests/chaos/test_resilience_scenarios.py::test_03_latency_sla_sequential
+  Sequential p99 Latency (function-reported): 1.38 ms
+  PASSED
+```
+
+All 5/5 chaos scenarios now pass (previously 4/5). `docs/operational_readiness_signoff.md`
+updated accordingly.
+
+## 3. Unity Catalog masking: re-enabled via a view, not a table-level mask
+
+`09-governance-security.md` documented the original attempt: applying a
+native column mask (`ALTER TABLE ... ALTER COLUMN ... SET MASK`) to
+`silver.streaming_transactions` worked, but mutated the base table's
+column type metadata with a `STRING COLLATE UTF8_BINARY` annotation that
+the older DBR 14.3 interactive cluster's SQL parser can't read back —
+breaking `spark.table()` for every Phase 3/4/6 pipeline script depending
+on that table. The mask was dropped to restore pipeline functionality,
+leaving masking verified-but-inactive.
+
+**Fix:** `databricks/governance/apply_data_masking_policies.sql` now
+creates `silver.streaming_transactions_masked` — a **view** that computes
+the same `mask_ip_address()`/`mask_device_id()` functions at query time —
+instead of altering the base table at all. A view is a separate object;
+creating it doesn't touch the raw table's stored schema, so nothing that
+calls `spark.table()` on the raw table is affected by the view's
+existence. Applied for real via the SQL Warehouse (Statement Execution
+API, `databricks-sdk`'s `WorkspaceClient.statement_execution`, since
+column masks/views require Shared-mode compute the same as before).
+
+**Verified both halves this time, not just the masking half:**
+
+1. Queried the view via the SQL Warehouse as a non-privileged principal:
+   `ip_address` came back `.xxx.xxx`, `device_id` came back `dev_****` —
+   masking genuinely enforced, same result as the original (reverted)
+   attempt.
+2. Read the **raw table** from the DBR 14.3 interactive cluster (Command
+   Execution API, the exact reproduction of the original break):
+   `spark.table("fraud_detection_dev.silver.streaming_transactions").count()`
+   → `31265`, no error. Confirmed the raw table is completely unaffected.
+3. For completeness, also read the *view* (not just the table) from the
+   same old interactive cluster — it fails with the identical
+   `PARSE_SYNTAX_ERROR ... COLLATE` error the table used to. This is fine
+   and expected: nothing in the pipeline needs to read the masked view
+   from that cluster — it exists for analyst/BI consumption via the SQL
+   Warehouse, which is the access pattern verified working above.
+
+**Not fixed, same known gap as before:** every `GRANT ... TO
+\`fraud-analysts\`` (and the other 4 role grants) still fails with
+`PRINCIPAL_DOES_NOT_EXIST` — Unity Catalog resolves grant principals
+against Databricks *account*-level identity, which still requires
+Account Console-level SCIM configuration unreachable headlessly. The
+masking mechanism itself doesn't depend on these grants and is proven
+working; the grants remain untested against a real group, exactly as
+before.
+
+## Updated sign-off status
+
+`docs/operational_readiness_signoff.md` item #15 (UC masking) and #16
+(chaos suite) updated to reflect: masking is now genuinely active on
+`silver.streaming_transactions_masked`, and 5/5 chaos scenarios pass. The
+"Known, deliberately-undone items" list's Logic Apps entry removed (now
+live); the Entra ID account-level group sync gap remains, unchanged.
+
+---
+
+### `docs/case_management_workflow.md`
+
+# Case Management & Operational Workflow Guide
+
+This document specifies the operational decision workflow, Azure SQL schema architecture, and decision API contracts for Phase 5.
+
+---
+
+## 1. Score Band Actions
+
+| Risk Score Band | Action | Processor | SLA | Action Summary |
+|---|---|---|---|---|
+| `[0.00, 0.10)` | `approve` | Fast-Path Azure Function | <15ms | Synchronously approve transaction |
+| `[0.10, 0.60)` | `step_up` | Service Bus + Logic Apps | 5 min | Trigger OTP challenge; wait 5m before escalation |
+| `[0.60, 0.90]` | `manual_review` | Service Bus + Azure SQL | 30 min | Queue in analyst workbench for human audit |
+| `(0.90, 1.00]` | `block` | Fast-Path Azure Function | <15ms | Synchronously block transaction & freeze card |
+
+---
+
+## 2. Azure SQL Case Database Schema
+
+The database consists of 5 core tables:
+1. `fraud_cases`: System of record for generated fraud cases (stores scoring mode, model version, SHAP JSON).
+2. `case_events`: Immutable audit trail tracking state changes (`CREATED`, `STATUS_CHANGED`, `ESCALATED`).
+3. `analyst_decisions`: History of manual analyst actions and audit notes.
+4. `threshold_audit`: Compliance audit trail for all threshold changes.
+5. `step_up_requests`: Log of OTP step-up authentication attempts.
+
+---
+
+## 3. Decision API Contract
+
+### Request: `POST /api/evaluate-decision`
+```json
+{
+    "transaction_id": "txn_1001",
+    "customer_id": "cust_101",
+    "card_id": "card_202",
+    "amount": 450.00,
+    "currency": "USD",
+    "fraud_probability": 0.72,
+    "scoring_mode": "full",
+    "model_version": "v1.0.0",
+    "top_risk_factors": [
+        {"feature": "vel_card_txn_count_5m", "shap_value": 0.34, "direction": "increases_risk"}
+    ]
+}
+```
+
+### Response: Status 202 Accepted
+```json
+{
+    "transaction_id": "txn_1001",
+    "decision_action": "manual_review",
+    "fraud_probability": 0.72,
+    "status": "PENDING_ASYNC",
+    "latency_ms": 8.42
+}
+```
+
+---
+
