@@ -16,7 +16,7 @@ import os
 from datetime import datetime, timezone
 
 import azure.functions as func
-from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import ResourceNotFoundError
 from azure.identity import ManagedIdentityCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 
@@ -58,10 +58,17 @@ def _persist_audit_record(audit_record: dict) -> None:
     Path pattern: gold/audit_logs/year=YYYY/month=MM/day=DD/<transaction_id>_<message_id>.json
     Each record is a separate file for atomic writes — no partial-write risk.
 
-    Deduplication: the file is keyed by message_id (not a wall-clock timestamp)
-    and written with overwrite=False. A Service Bus at-least-once redelivery of
-    the same message therefore maps to the same blob path; the resulting
-    ResourceExistsError is treated as "already persisted", not a failure.
+    Deduplication: the file is keyed by message_id (not a wall-clock timestamp),
+    so a Service Bus at-least-once redelivery of the same message maps to the
+    same blob path. Existence is checked explicitly with get_file_properties()
+    before writing, rather than relying on upload_data(overwrite=...) to do
+    double duty as a create-if-absent+dedup check: verified against the real
+    ADLS Gen2 REST API, overwrite=False raises ResourceNotFoundError when the
+    path doesn't exist yet (upload_data's internal append_data call assumes
+    the path is already there), while calling create_file() first to make
+    the path exist means the immediately-following overwrite=False write
+    raises ResourceExistsError against the very (empty) file it just made --
+    both fail every genuinely-new write and leave a permanent 0-byte file.
     """
     fs = _get_adls_fs_client()
     if fs is None:
@@ -79,14 +86,23 @@ def _persist_audit_record(audit_record: dict) -> None:
     try:
         dir_client = fs.get_directory_client(partition_path)
         dir_client.create_directory()  # no-op if already exists
-        file_client = dir_client.create_file(file_name)
+        file_client = dir_client.get_file_client(file_name)
+
+        already_exists = True
+        try:
+            file_client.get_file_properties()
+        except ResourceNotFoundError:
+            already_exists = False
+
+        if already_exists:
+            logger.info("Duplicate message detected (already persisted) — skipping. path=%s message_id=%s",
+                        full_path, audit_record.get("message_id"))
+            return
+
         record_bytes = (json.dumps(audit_record) + "\n").encode("utf-8")
-        file_client.upload_data(record_bytes, overwrite=False)
+        file_client.upload_data(record_bytes, overwrite=True)
         logger.info("Audit record persisted to ADLS: path=%s txn=%s",
                     full_path, audit_record.get("transaction_id"))
-    except ResourceExistsError:
-        logger.info("Duplicate message detected (already persisted) — skipping. path=%s message_id=%s",
-                     full_path, audit_record.get("message_id"))
     except Exception as exc:
         logger.error("ADLS write failure for txn=%s path=%s error=%s",
                      audit_record.get("transaction_id"), full_path, exc)

@@ -25,26 +25,7 @@
 
 ## Phase 5 Internal Dependency Graph
 
-```mermaid
-graph TD
-    A["5.1 Decision Banding\n& App Config (Bicep)"] --> B["5.2 Azure Function\nFast-Path Engine"]
-    A --> C["5.3 Service Bus Topic\nInfrastructure (Bicep)"]
-    B --> C
-    C --> D["5.4 Azure SQL Serverless\nCase DB (Bicep)"]
-    D --> E["5.5 Case Management\nSQL Schema (5 Tables)"]
-    E --> F["5.6 Case Insert Function\n(Service Bus Consumer)"]
-    C --> G["5.7 Logic Apps Step-Up\n& Analyst Workflow"]
-    C --> H["5.8 Compliance Audit\nLogging Function"]
-    G --> I["5.9 DLQ Monitor\nFunction & Alerting"]
-    F --> G
-    I --> J["5.10 Decision API\nContract"]
-    J --> K["5.11 End-to-End\nPhase 5 Validation"]
-
-    style B fill:#fff3e0,stroke:#f57c00
-    style C fill:#e3f2fd,stroke:#1976d2
-    style G fill:#e8f5e9,stroke:#4caf50
-    style D fill:#f3e5f5,stroke:#ab47bc
-```
+![alt text](image-5.png)
 
 ---
 
@@ -83,74 +64,60 @@ Immediate Response     Immediate Block   OTP / Push Auth       Analyst Queue
 
 ---
 
-## 5.2 Azure App Configuration Infrastructure (Bicep)
+## 5.2 Azure App Configuration Infrastructure (Terraform)
 
 > [!NOTE]
 > **Missing from original plan.** The reference architecture specifies dynamic thresholds via Azure App Configuration, not hardcoded values. This is critical for production operations — fraud ops teams need to adjust thresholds without engineering deployments.
 
-#### `infrastructure/modules/app-configuration.bicep`
+#### `infrastructure/modules/app-configuration/main.tf`
 
-```bicep
-@description('Environment name')
-param environment string = 'dev'
+```hcl
+resource "azurerm_app_configuration" "this" {
+  name                = "appcs-fraud-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = "free" # Free Trial: Free tier (1,000 requests/day)
 
-@description('Location')
-param location string
+  public_network_access = "Enabled"
 
-param projectName string = 'fraud-detection'
-
-var configStoreName = 'appcs-fraud-${environment}'
-
-resource appConfig 'Microsoft.AppConfiguration/configurationStores@2023-03-01' = {
-  name: configStoreName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
-  }
-  sku: {
-    name: 'free' // Free Trial: Free tier (1,000 requests/day)
-  }
-  properties: {
-    publicNetworkAccess: 'Enabled'
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
 
-// Seed default threshold values
-resource approveThreshold 'Microsoft.AppConfiguration/configurationStores/keyValues@2023-03-01' = {
-  parent: appConfig
-  name: 'FraudEngine:ApproveMaxThreshold'
-  properties: {
-    value: '0.10'
-    tags: { description: 'Maximum score for auto-approve' }
-  }
+# NOTE: writing keys requires the deploying identity to hold a data-plane role
+# on the store (e.g. "App Configuration Data Owner"), not just ARM-level
+# create permissions -- unlike Key Vault secrets, App Configuration key-values
+# aren't covered by resource-level RBAC alone.
+resource "azurerm_app_configuration_key" "approve_max_threshold" {
+  configuration_store_id = azurerm_app_configuration.this.id
+  key                    = "FraudEngine:ApproveMaxThreshold"
+  value                   = "0.10"
+  tags = { description = "Maximum score for auto-approve" }
 }
 
-resource stepUpThreshold 'Microsoft.AppConfiguration/configurationStores/keyValues@2023-03-01' = {
-  parent: appConfig
-  name: 'FraudEngine:StepUpMaxThreshold'
-  properties: {
-    value: '0.60'
-    tags: { description: 'Maximum score for step-up auth' }
-  }
+resource "azurerm_app_configuration_key" "step_up_max_threshold" {
+  configuration_store_id = azurerm_app_configuration.this.id
+  key                    = "FraudEngine:StepUpMaxThreshold"
+  value                   = "0.60"
+  tags = { description = "Maximum score for step-up auth" }
 }
 
-resource blockThreshold 'Microsoft.AppConfiguration/configurationStores/keyValues@2023-03-01' = {
-  parent: appConfig
-  name: 'FraudEngine:BlockMinThreshold'
-  properties: {
-    value: '0.90'
-    tags: { description: 'Minimum score for auto-block' }
-  }
+resource "azurerm_app_configuration_key" "block_min_threshold" {
+  configuration_store_id = azurerm_app_configuration.this.id
+  key                    = "FraudEngine:BlockMinThreshold"
+  value                   = "0.90"
+  tags = { description = "Minimum score for auto-block" }
 }
-
-output configStoreEndpoint string = appConfig.properties.endpoint
 ```
+
+`outputs.tf` exposes `config_store_id`, `config_store_name`, and `config_store_endpoint`.
 
 ---
 
-## 5.3 Azure Service Bus Infrastructure (Bicep)
+## 5.3 Azure Service Bus Infrastructure (Terraform)
 
 ### 5.3.1 Topic Topology & Subscriptions
 
@@ -176,197 +143,152 @@ A single Service Bus Topic `sb-topic-fraud-events` receives non-blocking async e
    Workflow                        Azure SQL Case DB              ADLS Audit Delta Table
 ```
 
-#### `infrastructure/modules/service-bus.bicep`
+#### `infrastructure/modules/service-bus/main.tf`
 
-```bicep
-@description('Environment name — dev for Free Trial')
-param environment string = 'dev'
+```hcl
+# --- Namespace (Standard tier required for Topics) ---
+resource "azurerm_servicebus_namespace" "this" {
+  name                = "sbns-fraud-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = "Standard"
 
-@description('Location')
-param location string
+  public_network_access_enabled = true
 
-param projectName string = 'fraud-detection'
-
-var namespaceName = 'sbns-fraud-${environment}'
-var topicName = 'sb-topic-fraud-events'
-
-// --- Service Bus Namespace (Standard Tier required for Topics) ---
-resource sbNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01-preview' = {
-  name: namespaceName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
-  }
-  sku: {
-    name: 'Standard'
-    tier: 'Standard'
-  }
-  properties: {
-    publicNetworkAccess: 'Enabled'
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
 
-// --- Topic: fraud-events ---
-resource sbTopic 'Microsoft.ServiceBus/namespaces/topics@2022-10-01-preview' = {
-  parent: sbNamespace
-  name: topicName
-  properties: {
-    defaultMessageTimeToLive: 'P7D' // 7 days TTL
-    maxSizeInMegabytes: 1024
-    requiresDuplicateDetection: true
-    duplicateDetectionHistoryTimeWindow: 'PT10M' // 10-minute dup detection window
-    enablePartitioning: false // Standard tier: not partitioned
-  }
+# --- Topic: fraud-events ---
+resource "azurerm_servicebus_topic" "fraud_events" {
+  name         = "sb-topic-fraud-events"
+  namespace_id = azurerm_servicebus_namespace.this.id
+
+  default_message_ttl                     = "P7D" # 7 days TTL
+  max_size_in_megabytes                   = 1024
+  requires_duplicate_detection            = true
+  duplicate_detection_history_time_window = "PT10M" # 10-minute dup detection window
+  partitioning_enabled                    = false   # Standard tier: not partitioned
 }
 
-// --- Subscription 1: Step-Up Auth Workflow (filtered to step_up actions only) ---
-resource subStepUp 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2022-10-01-preview' = {
-  parent: sbTopic
-  name: 'sub-stepup-auth'
-  properties: {
-    maxDeliveryCount: 5
-    deadLetteringOnMessageExpiration: true
-    enableBatchedOperations: true
-    lockDuration: 'PT1M'
-  }
+# --- Subscription 1: Step-Up Auth Workflow (filtered to step_up actions only) ---
+resource "azurerm_servicebus_subscription" "step_up" {
+  name                                 = "sub-stepup-auth"
+  topic_id                             = azurerm_servicebus_topic.fraud_events.id
+  max_delivery_count                   = 5
+  dead_lettering_on_message_expiration = true
+  batched_operations_enabled           = true
+  lock_duration                        = "PT1M"
 }
 
-resource ruleStepUp 'Microsoft.ServiceBus/namespaces/topics/subscriptions/rules@2022-10-01-preview' = {
-  parent: subStepUp
-  name: 'FilterStepUp'
-  properties: {
-    filterType: 'CorrelationFilter'
-    correlationFilter: {
-      properties: {
-        action: 'step_up'
-      }
+resource "azurerm_servicebus_subscription_rule" "filter_step_up" {
+  name            = "FilterStepUp"
+  subscription_id = azurerm_servicebus_subscription.step_up.id
+  filter_type     = "CorrelationFilter"
+
+  correlation_filter {
+    properties = {
+      action = "step_up"
     }
   }
 }
 
-// --- Subscription 2: Case Management (all actions except approve) ---
-resource subCaseMgmt 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2022-10-01-preview' = {
-  parent: sbTopic
-  name: 'sub-case-mgmt'
-  properties: {
-    maxDeliveryCount: 5
-    deadLetteringOnMessageExpiration: true
-    enableBatchedOperations: true
-    lockDuration: 'PT1M'
-  }
+# --- Subscription 2: Case Management (unfiltered -- catches every published decision) ---
+resource "azurerm_servicebus_subscription" "case_mgmt" {
+  name                                 = "sub-case-mgmt"
+  topic_id                             = azurerm_servicebus_topic.fraud_events.id
+  max_delivery_count                   = 5
+  dead_lettering_on_message_expiration = true
+  batched_operations_enabled           = true
+  lock_duration                        = "PT1M"
 }
 
-// --- Subscription 3: Compliance Audit Log (receives ALL events) ---
-resource subAuditLog 'Microsoft.ServiceBus/namespaces/topics/subscriptions@2022-10-01-preview' = {
-  parent: sbTopic
-  name: 'sub-audit-log'
-  properties: {
-    maxDeliveryCount: 10 // Higher retry count for compliance — data loss unacceptable
-    deadLetteringOnMessageExpiration: true
-    enableBatchedOperations: true
-    lockDuration: 'PT1M'
-  }
+# --- Subscription 3: Compliance Audit Log (receives ALL events) ---
+resource "azurerm_servicebus_subscription" "audit_log" {
+  name                                 = "sub-audit-log"
+  topic_id                             = azurerm_servicebus_topic.fraud_events.id
+  max_delivery_count                   = 10 # Higher retry count for compliance — data loss unacceptable
+  dead_lettering_on_message_expiration = true
+  batched_operations_enabled           = true
+  lock_duration                        = "PT1M"
 }
 
-// --- Authorization Rules ---
-resource sendAuthRule 'Microsoft.ServiceBus/namespaces/topics/authorizationRules@2022-10-01-preview' = {
-  parent: sbTopic
-  name: 'publisher-send-rule'
-  properties: { rights: ['Send'] }
+# --- Authorization Rules (topic-level, least privilege) ---
+resource "azurerm_servicebus_topic_authorization_rule" "publisher_send" {
+  name     = "publisher-send-rule"
+  topic_id = azurerm_servicebus_topic.fraud_events.id
+
+  send   = true
+  listen = false
+  manage = false
 }
 
-resource listenAuthRule 'Microsoft.ServiceBus/namespaces/topics/authorizationRules@2022-10-01-preview' = {
-  parent: sbTopic
-  name: 'consumer-listen-rule'
-  properties: { rights: ['Listen'] }
-}
+resource "azurerm_servicebus_topic_authorization_rule" "consumer_listen" {
+  name     = "consumer-listen-rule"
+  topic_id = azurerm_servicebus_topic.fraud_events.id
 
-output namespaceName string = sbNamespace.name
-output topicName string = topicName
-output sendConnectionString string = sendAuthRule.listKeys().primaryConnectionString
-output listenConnectionString string = listenAuthRule.listKeys().primaryConnectionString
+  send   = false
+  listen = true
+  manage = false
+}
 ```
+
+Outputs (`variables.tf`/`outputs.tf`) expose `namespace_name`, `topic_name`, and the send/listen primary connection strings (marked `sensitive = true`) for downstream RBAC/app wiring — replacing Bicep's `listKeys()` calls with native Terraform sensitive outputs.
 
 ---
 
-## 5.4 Azure SQL Database Serverless Infrastructure (Bicep)
+## 5.4 Azure SQL Database Serverless Infrastructure (Terraform)
 
-#### `infrastructure/modules/azure-sql.bicep`
+#### `infrastructure/modules/azure-sql/main.tf`
 
-```bicep
-@description('Environment name — dev for Free Trial')
-param environment string = 'dev'
+```hcl
+resource "azurerm_mssql_server" "this" {
+  name                = "sql-fraud-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
 
-@description('Location')
-param location string
+  administrator_login           = var.sql_admin_login
+  administrator_login_password  = var.sql_admin_password
+  version                       = "12.0"
+  public_network_access_enabled = true
 
-param projectName string = 'fraud-detection'
-
-@description('SQL Admin login name')
-param sqlAdminLogin string = 'fraudsqladmin'
-
-@description('SQL Admin password from Key Vault')
-@secure()
-param sqlAdminPassword string
-
-var serverName = 'sql-fraud-${environment}'
-var dbName = 'sqldb-fraud-cases-${environment}'
-
-// --- Azure SQL Logical Server ---
-resource sqlServer 'Microsoft.Sql/servers@2023-05-01-preview' = {
-  name: serverName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
-  }
-  properties: {
-    administratorLogin: sqlAdminLogin
-    administratorLoginPassword: sqlAdminPassword
-    version: '12.0'
-    publicNetworkAccess: 'Enabled'
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
 
-resource sqlFirewallAzure 'Microsoft.Sql/servers/firewallRules@2023-05-01-preview' = {
-  parent: sqlServer
-  name: 'AllowAllWindowsAzureIps'
-  properties: {
-    startIpAddress: '0.0.0.0'
-    endIpAddress: '0.0.0.0'
-  }
+resource "azurerm_mssql_firewall_rule" "allow_azure_services" {
+  name             = "AllowAllWindowsAzureIps"
+  server_id        = azurerm_mssql_server.this.id
+  start_ip_address = "0.0.0.0"
+  end_ip_address   = "0.0.0.0"
 }
 
-// --- Azure SQL Database: Serverless GP_S_Gen5_1 ---
-resource sqlDatabase 'Microsoft.Sql/servers/databases@2023-05-01-preview' = {
-  parent: sqlServer
-  name: dbName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
-  }
-  sku: {
-    name: 'GP_S_Gen5'
-    tier: 'GeneralPurpose'
-    family: 'Gen5'
-    capacity: 1
-  }
-  properties: {
-    autoPauseDelay: 60
-    minCapacity: json('0.5')
-    maxSizeBytes: 34359738368
-    zoneRedundant: false
+# --- Serverless General Purpose GP_S_Gen5_1, auto-pause after 60 min idle ---
+resource "azurerm_mssql_database" "cases" {
+  name      = "sqldb-fraud-cases-${var.environment}"
+  server_id = azurerm_mssql_server.this.id
+
+  sku_name                    = "GP_S_Gen5_1"
+  auto_pause_delay_in_minutes = 60
+  min_capacity                = 0.5
+  max_size_gb                 = 32
+  zone_redundant              = false
+
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
-
-output sqlServerFqdn string = sqlServer.properties.fullyQualifiedDomainName
-output sqlDatabaseName string = sqlDatabase.name
 ```
+
+`sql_admin_password` is passed in via the root module's `sql_admin_password` variable (`sensitive = true`, sourced from Key Vault / CI secret — never committed to `.tfvars`), replacing Bicep's `@secure()` decorator. Outputs expose `sql_server_fqdn` and `sql_database_name`.
 
 ---
 
@@ -1033,9 +955,9 @@ def dlq_monitor(timer: func.TimerRequest):
 fraud-detection-platform/
 ├── infrastructure/
 │   └── modules/
-│       ├── service-bus.bicep                  # [NEW] Service Bus Topic + 3 Subscriptions + Rules
-│       ├── azure-sql.bicep                    # [NEW] Azure SQL Serverless GP_S_Gen5_1 + Firewall
-│       └── app-configuration.bicep            # [NEW] Azure App Configuration + Default Thresholds
+│       ├── service-bus/main.tf                # [NEW] Service Bus Topic + 3 Subscriptions + Rules
+│       ├── azure-sql/main.tf                  # [NEW] Azure SQL Serverless GP_S_Gen5_1 + Firewall
+│       └── app-configuration/main.tf          # [NEW] Azure App Configuration + Default Thresholds
 │
 ├── database/
 │   ├── migrations/
@@ -1075,9 +997,9 @@ fraud-detection-platform/
 
 | # | Check | Command / Method | Expected Result | Criticality |
 |---|---|---|---|---|
-| 1 | App Configuration deploys with thresholds | Run `app-configuration.bicep` | 3 threshold keys seeded | 🔴 Blocking |
-| 2 | Service Bus Topic & 3 Subscriptions deploy | Run `service-bus.bicep` | Topic + step-up/case-mgmt/audit-log subscriptions exist | 🔴 Blocking |
-| 3 | Azure SQL Serverless deploys | Run `azure-sql.bicep` | Database provisioned with auto-pause | 🔴 Blocking |
+| 1 | App Configuration deploys with thresholds | Run `terraform apply` (module `app-configuration`) | 3 threshold keys seeded | 🔴 Blocking |
+| 2 | Service Bus Topic & 3 Subscriptions deploy | Run `terraform apply` (module `service-bus`) | Topic + step-up/case-mgmt/audit-log subscriptions exist | 🔴 Blocking |
+| 3 | Azure SQL Serverless deploys | Run `terraform apply` (module `azure-sql`) | Database provisioned with auto-pause | 🔴 Blocking |
 | 4 | SQL Schema — all 5 tables created | Execute V001-V005 migrations | `fraud_cases`, `case_events`, `analyst_decisions`, `threshold_audit`, `step_up_requests` exist | 🔴 Blocking |
 | 5 | Idempotent MERGE + audit event | Call `sp_upsert_fraud_case` twice | Single case row + `case_events` CREATED entry | 🔴 Blocking |
 | 6 | Status update logs to audit trail | Call `sp_update_case_status` | `case_events` STATUS_CHANGED entry with old/new status | 🔴 Blocking |
@@ -1119,7 +1041,7 @@ fraud-detection-platform/
 | 7 | `functions/audit_logger/function_app.py` vs `functions/decision_engine/function_app.py` | `audit_logger` hardcoded `threshold_config` to `{0.10, 0.60, 0.90}` in every audit record, while `decision_engine` refreshes real thresholds from App Configuration every 60s and never included the thresholds it actually used in the published Service Bus payload. If thresholds were ever changed in App Config, the compliance audit trail would silently record the wrong values used for a decision. | `decision_engine`'s published event now includes the exact `threshold_config` (`approve_max`/`step_up_max`/`block_min`) used to classify that transaction; `audit_logger` reads it from the message instead of hardcoding it. |
 | 8 | `database/stored_procedures/sp_upsert_fraud_case.sql` | Computed `@case_id` into a local variable but never returned it to the caller (no final `SELECT`). Any caller needing the case_id for a follow-up call — e.g. the Logic App workflow below, which needs it for `sp_update_case_status` — had no way to retrieve it. | Added `SELECT @case_id AS case_id;` as the procedure's final statement, so SQL-connector callers receive it as a result set. |
 | 9 | `logic-apps/workflows/workflow_stepup_auth.json` | `Parse_Message_JSON` fed `@triggerBody()?['ContentData']` straight into `ParseJson`, but the Service Bus API-connection trigger returns message content **base64-encoded** in `ContentData` — every message would fail JSON schema validation immediately. Separately, `Upsert_Case_Record` had no `body` at all (the stored procedure's required parameters were never supplied), and `Escalate_If_Timeout`'s body was missing the (non-optional) `case_id` parameter entirely — both calls would fail. | `Parse_Message_JSON` now wraps the content in `base64ToString(...)`. `Upsert_Case_Record` now maps all `sp_upsert_fraud_case` parameters from the parsed message. `Escalate_If_Timeout` now passes `case_id` sourced from `Upsert_Case_Record`'s result set (`ResultSets.Table1[0].case_id` — **flagged for verification**: the exact output shape should be checked against the live SQL connector before first deployment, same caveat as the RBAC role GUIDs below). |
-| 10 | `infrastructure/modules/service-bus.bicep`'s `sub-case-mgmt` subscription | This subscription is unfiltered (catches every published decision, including `manual_review`), and per this phase's own architecture is meant to be the consumer that creates the Azure SQL case record for decisions `workflow_stepup_auth.json` never sees (it's filtered to `action=='step_up'` only). **No consumer for `sub-case-mgmt` existed anywhere in the repo** — meaning a `manual_review` decision (the 0.60–0.90 score band) never got a case created in Azure SQL at all, end to end. | Added `logic-apps/workflows/workflow_case_management.json`: a new, minimal workflow subscribing to `sub-case-mgmt` that upserts a case for every decision event it receives. It intentionally does nothing else (no wait/escalate) — `workflow_stepup_auth.json` remains the sole owner of the step-up-specific timing logic, and calling `sp_upsert_fraud_case` from both workflows for the same step_up message is safe (idempotent MERGE). |
+| 10 | `infrastructure/modules/service-bus/main.tf`'s `sub-case-mgmt` subscription | This subscription is unfiltered (catches every published decision, including `manual_review`), and per this phase's own architecture is meant to be the consumer that creates the Azure SQL case record for decisions `workflow_stepup_auth.json` never sees (it's filtered to `action=='step_up'` only). **No consumer for `sub-case-mgmt` existed anywhere in the repo** — meaning a `manual_review` decision (the 0.60–0.90 score band) never got a case created in Azure SQL at all, end to end. | Added `logic-apps/workflows/workflow_case_management.json`: a new, minimal workflow subscribing to `sub-case-mgmt` that upserts a case for every decision event it receives. It intentionally does nothing else (no wait/escalate) — `workflow_stepup_auth.json` remains the sole owner of the step-up-specific timing logic, and calling `sp_upsert_fraud_case` from both workflows for the same step_up message is safe (idempotent MERGE). |
 | 11 | `database/migrations/V003__create_analyst_decisions.sql`, `V005__create_step_up_and_ref.sql` | `analyst_decisions.decision_result` and `step_up_requests.auth_status` had no `CHECK` constraint, unlike every other status/action/resolution column in V001/V002. A typo'd value (e.g. `CONFRIMED_FRAUD`) would silently fail to match `ingest_chargeback_feedback.py`'s exact-string filters instead of erroring at insert time. | Added `chk_decision_result CHECK (... IN ('CONFIRMED_FRAUD','CONFIRMED_LEGIT','INCONCLUSIVE'))` (matching V001's `chk_resolution` enum, which `ingest_chargeback_feedback.py` actually filters on) and `chk_auth_status CHECK (... IN ('PENDING','VERIFIED','FAILED','EXPIRED'))`. |
 
 ### Known, intentionally-unresolved gap: the full step-up/analyst workflow
@@ -1128,4 +1050,4 @@ The mermaid diagram in §5.8 describes a much richer flow than what's actually i
 
 This fix pass deliberately did **not** fabricate that subsystem. Building it would mean inventing an entire new feature (external OTP delivery, a public callback API with its own auth, an analyst roster schema and UI) with no way to validate any of it without live Azure infrastructure — which risks shipping something that looks complete but has never actually been exercised. Instead, `workflow_stepup_auth.json`'s existing behavior — wait 5 minutes, then unconditionally escalate to manual review — is the conservative, safe fallback the diagram itself specifies for the timeout branch (`D -->|Timeout| G`), and is now honestly labelled as such (see the `notes` field added to `Escalate_If_Timeout`'s call in fix #9 above) rather than silently presented as the full flow. Building the real OTP/analyst-assignment subsystem is a genuine follow-up project, not a bug fix.
 
-Separately: no Bicep module (`infrastructure/modules/*.bicep`) actually deploys `Microsoft.Logic/workflows` or the Service Bus/SQL API connections these workflows depend on — the workflow JSON files exist as artifacts only. A `logic-app.bicep` module is referenced as planned in this phase's file tree but was never created.
+Separately: no Terraform module (`infrastructure/modules/*`) actually deploys `azurerm_logic_app_workflow` or the Service Bus/SQL API connections these workflows depend on — the workflow JSON files exist as artifacts only. A `logic-app` module is referenced as planned in this phase's file tree but was never created.
