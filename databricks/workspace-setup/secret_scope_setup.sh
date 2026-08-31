@@ -6,7 +6,11 @@
 set -euo pipefail
 
 ENVIRONMENT="${1:-dev}"
-KV_NAME="kv-fraud-${ENVIRONMENT}"
+RG="rg-fraud-detection-${ENVIRONMENT}"
+# Key Vault names are globally unique across all Azure tenants, so the
+# deployed vault carries a random suffix rather than the bare
+# "kv-fraud-${ENVIRONMENT}" -- resolve the real name instead of assuming it.
+KV_NAME=$(az keyvault list --resource-group "${RG}" --query "[0].name" -o tsv)
 KV_RESOURCE_ID=$(az keyvault show --name "${KV_NAME}" --query id -o tsv)
 KV_DNS_NAME=$(az keyvault show --name "${KV_NAME}" --query properties.vaultUri -o tsv)
 

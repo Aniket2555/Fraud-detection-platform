@@ -3,6 +3,7 @@ Producer configuration dataclass reading environment variables.
 """
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 
 def _env_bool(name: str, default: str) -> bool:
@@ -24,4 +25,13 @@ class ProducerConfig:
     schema_path: str = os.environ.get("SCHEMA_PATH", "schemas/transaction_event_v1.json")
     validate_schema: bool = field(default_factory=lambda: _env_bool("VALIDATE_SCHEMA", "true"))
     log_interval: int = int(os.environ.get("LOG_INTERVAL", "1000"))
-    time_anchor: str = "2025-01-01T00:00:00Z"
+    # Anchors synthesized event_time = time_anchor + dataset's Time offset.
+    # Defaults to "now" so a live replay produces realistic near-real-time
+    # timestamps (and therefore a meaningful enqueuedTime - event_time late-
+    # arrival distribution); override with a fixed value for reproducible
+    # historical-looking test data instead.
+    time_anchor: str = field(
+        default_factory=lambda: os.environ.get(
+            "TIME_ANCHOR", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+    )
