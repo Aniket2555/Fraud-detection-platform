@@ -1,23 +1,23 @@
 # Phase 7 — Governance, Security & Hardening: Production-Grade Implementation Plan
 
 > [!IMPORTANT]
-> This is the **exhaustive, production-grade** plan for Phase 7. Every governance policy (Unity Catalog lineage & column masking), PCI-DSS scope isolation rule (PAN tokenization, PII SHA-256 hashing with Key Vault salt), Entra ID RBAC matrix (7 identity assignments with proper Bicep scoping), Key Vault secret rotation routine, centralized diagnostic settings Bicep module (applied to Key Vault, Event Hubs, ADLS, SQL, Service Bus, App Configuration), Private Endpoints upgrade template (ADLS Gen2, Key Vault, SQL, Service Bus Private DNS Zones), security scanning pipeline (TruffleHog secret detection + Checkov IaC + Bandit Python SAST + dependency vulnerability scanning), chaos resilience test suite (5 scenarios: corrupted payload, latency under load, concurrent storm, Service Bus retry, database connection exhaustion), data retention & purge policy, disaster recovery plan (RTO/RPO targets), end-to-end 8-step platform verification script, and operational readiness sign-off checklist are specified here. Phase 7 hardens the entire fraud detection platform for production audit compliance and zero-trust security.
+> This is the **exhaustive, production-grade** plan for Phase 7. Every governance policy (Unity Catalog lineage & column masking), PCI-DSS scope isolation rule (PAN tokenization, PII SHA-256 hashing with Key Vault salt), Entra ID RBAC matrix (7 identity assignments with proper Terraform scoping), Key Vault secret rotation routine, centralized diagnostic settings Terraform module (applied to Key Vault, Event Hubs, ADLS, SQL, Service Bus, App Configuration), Private Endpoints upgrade template (ADLS Gen2, Key Vault, SQL, Service Bus Private DNS Zones), security scanning pipeline (TruffleHog secret detection + Checkov IaC + Bandit Python SAST + dependency vulnerability scanning), chaos resilience test suite (5 scenarios: corrupted payload, latency under load, concurrent storm, Service Bus retry, database connection exhaustion), data retention & purge policy, disaster recovery plan (RTO/RPO targets), end-to-end 8-step platform verification script, and operational readiness sign-off checklist are specified here. Phase 7 hardens the entire fraud detection platform for production audit compliance and zero-trust security.
 
 > [!CAUTION]
 > ## Azure Free Trial Constraints (Phase 7 Adaptation)
 > Governance and security services must stay within the $200 Free Trial budget:
 > - **Microsoft Purview:** Not deployed. Unity Catalog provides native column masking, row filtering, and data lineage within Databricks. Purview automated scanning deferred to production upgrade.
 > - **Log Analytics Workspace:** Standard SKU with **30-day data retention** and a strict **1 GB/day ingestion cap** to stay within the 5 GB/month free tier.
-> - **Private Link / Private Endpoints:** Documented as an IaC upgrade module (`private-endpoints.bicep`) with full Private DNS Zone configuration. Service Firewalls + Azure IP allowlisting are used for Free Trial dev execution.
+> - **Private Link / Private Endpoints:** Documented as an IaC upgrade module (`infrastructure/modules/private-endpoints`) with full Private DNS Zone configuration. Service Firewalls + Azure IP allowlisting are used for Free Trial dev execution.
 > - **Microsoft Entra ID (Azure AD):** Developer Tenant / Free Edition for RBAC role assignments and Managed Identities.
-> - **NSG Rules:** Defined in Bicep but applied with permissive dev rules (open HTTPS/SSH from Azure IPs only).
+> - **NSG Rules:** Defined in Terraform but applied with permissive dev rules (open HTTPS/SSH from Azure IPs only).
 > - **Total Phase 7 estimated cost:** $0 additional.
 >
 > **Upgrade path:** For enterprise production, enable Microsoft Purview automated scanning, upgrade Log Analytics retention to 365 days for PCI compliance, deploy Private Endpoints with Private DNS Zones across all Azure resources, enable HSM-backed Key Vault Premium, and restrict NSG rules to VNet-only traffic.
 
 **Prerequisite:** Phases 0 through 6 are complete, verified, and operational. End-to-end streaming, features, hybrid models, decision workflows, and MLOps loops are functioning.
 
-**Phase 7 Goal:** Enforce end-to-end data lineage and governance via Unity Catalog, isolate PCI-DSS scope with PII masking and tokenized identifiers, configure centralized diagnostic logging as a reusable Bicep module, implement automated security scanning in CI/CD (4 scan types), conduct comprehensive chaos resilience testing (5 scenarios), define data retention and disaster recovery policies, and execute the final 8-step operational readiness verification.
+**Phase 7 Goal:** Enforce end-to-end data lineage and governance via Unity Catalog, isolate PCI-DSS scope with PII masking and tokenized identifiers, configure centralized diagnostic logging as a reusable Terraform module, implement automated security scanning in CI/CD (4 scan types), conduct comprehensive chaos resilience testing (5 scenarios), define data retention and disaster recovery policies, and execute the final 8-step operational readiness verification.
 
 **Duration:** 2 weeks
 
@@ -31,7 +31,7 @@ graph TD
     A --> C["7.3 Entra ID RBAC &\nManaged Identity Matrix"]
     B --> D["7.4 Key Vault Audit &\nSecret Rotation Engine"]
     C --> D
-    D --> E["7.5 Centralized Diagnostics\nBicep Module"]
+    D --> E["7.5 Centralized Diagnostics\nTerraform Module"]
     E --> F["7.6 Private Endpoints\nUpgrade Template"]
     F --> G["7.7 Security Scanning in CI/CD\n(4 Scan Types)"]
     G --> H["7.8 Chaos Engineering &\nResilience Testing (5 Scenarios)"]
@@ -220,61 +220,55 @@ Zero-trust principles govern service-to-service and user-to-resource interaction
 | Group `data-engineers` | **Contributor** + Unity Catalog `ALL` | Databricks & ADLS Gen2 | Entra ID User Auth |
 
 > [!NOTE]
-> **Fixed from original plan.** The original Bicep used `scope: resourceSymbolicName` which is an undefined variable. The improved version properly scopes role assignments using `existing` resource references with correct `scope` targets.
+> **Fixed from original plan.** Bicep's approach required `scope: resourceSymbolicName` bindings and a `guid()`-derived name per assignment to stay idempotent. In Terraform, every target resource (storage account, Key Vault, Service Bus namespace, App Configuration store, SQL database) is created in the *same* state as this module, so its ID is simply passed in as a variable — no `existing`-style lookups, and no manual name/GUID generation, since Terraform state itself provides idempotency and `azurerm_role_assignment` auto-generates its own name.
 
-#### `infrastructure/modules/rbac-assignments.bicep`
+#### `infrastructure/modules/rbac-assignments/main.tf`
 
-```bicep
-@description('Environment name')
-param environment string = 'dev'
-
-@description('Databricks System-Assigned Principal ID')
-param databricksPrincipalId string
-
-@description('Decision Function System-Assigned Principal ID')
-param decisionFunctionPrincipalId string
-
-@description('ADLS Gen2 Storage Account Name')
-param storageAccountName string
-
-@description('Key Vault Name')
-param keyVaultName string
-
-// --- Reference Existing Resources ---
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' existing = {
-  name: storageAccountName
+```hcl
+# --- Databricks -> ADLS Gen2 Storage Blob Data Contributor ---
+resource "azurerm_role_assignment" "databricks_storage" {
+  scope                = var.storage_account_id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = var.databricks_principal_id
 }
 
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: keyVaultName
+# --- Databricks -> Key Vault Secrets User ---
+resource "azurerm_role_assignment" "databricks_key_vault" {
+  scope                = var.key_vault_id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = var.databricks_principal_id
 }
 
-// --- Role Definition IDs (Azure Built-In Roles) ---
-var storageBlobDataContributorId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
-var keyVaultSecretsUserId = '4633005b-87f7-41d1-bf41-8779d9c5332e'
-
-// --- Assign: Databricks → ADLS Gen2 Storage Blob Data Contributor ---
-resource storageRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccount.id, databricksPrincipalId, storageBlobDataContributorId)
-  scope: storageAccount
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorId)
-    principalId: databricksPrincipalId
-    principalType: 'ServicePrincipal'
-  }
+# --- Decision Function -> Service Bus Data Sender ---
+resource "azurerm_role_assignment" "decision_function_service_bus" {
+  scope                = var.service_bus_namespace_id
+  role_definition_name = "Azure Service Bus Data Sender"
+  principal_id         = var.decision_function_principal_id
 }
 
-// --- Assign: Databricks → Key Vault Secrets User ---
-resource kvRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, databricksPrincipalId, keyVaultSecretsUserId)
-  scope: keyVault
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserId)
-    principalId: databricksPrincipalId
-    principalType: 'ServicePrincipal'
-  }
+# --- Decision Function -> App Configuration Data Reader ---
+resource "azurerm_role_assignment" "decision_function_app_config" {
+  scope                = var.app_configuration_id
+  role_definition_name = "App Configuration Data Reader"
+  principal_id         = var.decision_function_principal_id
+}
+
+# --- Logic App -> Service Bus Data Receiver ---
+resource "azurerm_role_assignment" "logic_app_service_bus" {
+  scope                = var.service_bus_namespace_id
+  role_definition_name = "Azure Service Bus Data Receiver"
+  principal_id         = var.logic_app_principal_id
+}
+
+# --- Logic App -> SQL DB Contributor ---
+resource "azurerm_role_assignment" "logic_app_sql" {
+  scope                = var.sql_database_id
+  role_definition_name = "SQL DB Contributor"
+  principal_id         = var.logic_app_principal_id
 }
 ```
+
+Role names are resolved against the live subscription's role definitions at plan/apply time — a typo fails loudly (`role definition not found`) rather than silently assigning the wrong role the way an unverified hardcoded GUID could. This single module now covers all 6 identity→resource assignments from the matrix above (the `fraud-analysts`/`data-engineers` group rows are handled separately via Unity Catalog grants, not this module).
 
 ---
 
@@ -360,135 +354,121 @@ if __name__ == "__main__":
 
 ---
 
-## 7.5 Centralized Diagnostic Settings (Reusable Bicep Module)
+## 7.5 Centralized Diagnostic Settings (Reusable Terraform Module)
 
 > [!NOTE]
-> **Improved from original plan.** The original was a code snippet. The improved version is a proper reusable Bicep module that can be applied to any Azure resource via a module call in `main.bicep`.
+> **Improved from original plan.** The original was a code snippet. The improved version is a proper reusable Terraform module invoked once per target resource (via `for_each` in the root `main.tf`), rather than copy-pasted per resource.
 
-#### `infrastructure/modules/diagnostic-settings.bicep`
+#### `infrastructure/modules/diagnostic-settings/main.tf`
 
-```bicep
-@description('Name of the target resource for diagnostic collection')
-param targetResourceName string
+```hcl
+# Generic, reusable diagnostic-settings module -- attach Log Analytics
+# diagnostics to any resource by passing its resource ID.
+resource "azurerm_monitor_diagnostic_setting" "this" {
+  name                       = "diag-${var.target_resource_name}"
+  target_resource_id         = var.target_resource_id
+  log_analytics_workspace_id = var.log_analytics_workspace_id
 
-@description('Resource ID of the target resource')
-param targetResourceId string
+  enabled_log {
+    category_group = "allLogs"
+  }
 
-@description('Resource ID of the Log Analytics Workspace')
-param logAnalyticsWorkspaceId string
-
-@description('Log retention in days (30 for Free Trial, 365 for PCI production)')
-param retentionDays int = 30
-
-resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
-  name: 'diag-${targetResourceName}'
-  scope: any(targetResourceId)  // Scoped to the target resource
-  properties: {
-    workspaceId: logAnalyticsWorkspaceId
-    logs: [
-      {
-        categoryGroup: 'allLogs'
-        enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: retentionDays
-        }
-      }
-    ]
-    metrics: [
-      {
-        category: 'AllMetrics'
-        enabled: true
-        retentionPolicy: {
-          enabled: true
-          days: retentionDays
-        }
-      }
-    ]
+  enabled_metric {
+    category = "AllMetrics"
   }
 }
 ```
+
+Log retention (30 days for Free Trial, 365 days for PCI production) is configured once on the `azurerm_log_analytics_workspace` itself (see §7.1's Log Analytics module), rather than per diagnostic setting as in the original Bicep — the `azurerm_monitor_diagnostic_setting` resource in the current provider version has no per-setting `retention_policy` block of its own.
 
 ---
 
 ## 7.6 Private Endpoints Upgrade Template
 
 > [!NOTE]
-> **Missing from original plan.** The file tree referenced `private-endpoints.bicep` but no code was provided. This module provisions Private Endpoints with Private DNS Zone integration for ADLS Gen2, Key Vault, Azure SQL, and Service Bus. Disabled by default for Free Trial (controlled via `enablePrivateEndpoints` parameter).
+> **Missing from original plan.** The file tree referenced a private-endpoints module but no code was provided. This module provisions Private Endpoints with Private DNS Zone integration for ADLS Gen2 and Key Vault (Azure SQL and Service Bus follow the same pattern on the production upgrade path). Disabled by default for Free Trial (controlled via `enable_private_endpoints`).
 
-#### `infrastructure/modules/private-endpoints.bicep`
+#### `infrastructure/modules/private-endpoints/main.tf`
 
-```bicep
-@description('Environment name')
-param environment string = 'dev'
+```hcl
+# Free Trial: enable_private_endpoints defaults to false (saves ~$7.20/month
+# per endpoint -- Service Firewalls + Azure IP rules are used instead). Flip
+# to true for the production upgrade.
+#
+# NOTE: unlike the original Bicep draft (which created the private endpoints
+# and DNS zones but never linked them together), this module wires the DNS
+# zone group directly as a nested block inside each `azurerm_private_endpoint`
+# resource -- that's how the azurerm provider models it, so the two can't
+# drift apart the way two independent Bicep resources could.
 
-@description('Location')
-param location string
+resource "azurerm_private_dns_zone" "storage" {
+  count               = var.enable_private_endpoints ? 1 : 0
+  name                = "privatelink.dfs.core.windows.net"
+  resource_group_name = var.resource_group_name
+}
 
-@description('VNet name for private endpoint subnet')
-param vnetName string
+resource "azurerm_private_dns_zone" "key_vault" {
+  count               = var.enable_private_endpoints ? 1 : 0
+  name                = "privatelink.vaultcore.azure.net"
+  resource_group_name = var.resource_group_name
+}
 
-@description('Private endpoint subnet name')
-param privateEndpointSubnetName string = 'snet-private-endpoints'
+resource "azurerm_private_dns_zone_virtual_network_link" "storage" {
+  count                 = var.enable_private_endpoints ? 1 : 0
+  name                  = "link-storage-${var.environment}"
+  resource_group_name   = var.resource_group_name
+  private_dns_zone_name = azurerm_private_dns_zone.storage[0].name
+  virtual_network_id    = var.vnet_id
+  registration_enabled  = false
+}
 
-@description('ADLS Gen2 Storage Account Resource ID')
-param storageAccountId string
+resource "azurerm_private_dns_zone_virtual_network_link" "key_vault" {
+  count                 = var.enable_private_endpoints ? 1 : 0
+  name                  = "link-keyvault-${var.environment}"
+  resource_group_name   = var.resource_group_name
+  private_dns_zone_name = azurerm_private_dns_zone.key_vault[0].name
+  virtual_network_id    = var.vnet_id
+  registration_enabled  = false
+}
 
-@description('Key Vault Resource ID')
-param keyVaultId string
+resource "azurerm_private_endpoint" "storage" {
+  count               = var.enable_private_endpoints ? 1 : 0
+  name                = "pe-storage-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  subnet_id           = var.private_endpoint_subnet_id
 
-@description('Enable private endpoints (false for Free Trial, true for production)')
-param enablePrivateEndpoints bool = false
+  private_service_connection {
+    name                           = "plsc-storage-${var.environment}"
+    private_connection_resource_id = var.storage_account_id
+    subresource_names              = ["dfs"]
+    is_manual_connection           = false
+  }
 
-// --- Conditional Private Endpoint: ADLS Gen2 ---
-resource storagePe 'Microsoft.Network/privateEndpoints@2023-04-01' = if (enablePrivateEndpoints) {
-  name: 'pe-storage-${environment}'
-  location: location
-  properties: {
-    subnet: {
-      id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, privateEndpointSubnetName)
-    }
-    privateLinkServiceConnections: [
-      {
-        name: 'plsc-storage-${environment}'
-        properties: {
-          privateLinkServiceId: storageAccountId
-          groupIds: ['dfs']
-        }
-      }
-    ]
+  private_dns_zone_group {
+    name                 = "dns-zone-group-storage"
+    private_dns_zone_ids = [azurerm_private_dns_zone.storage[0].id]
   }
 }
 
-// --- Conditional Private Endpoint: Key Vault ---
-resource kvPe 'Microsoft.Network/privateEndpoints@2023-04-01' = if (enablePrivateEndpoints) {
-  name: 'pe-keyvault-${environment}'
-  location: location
-  properties: {
-    subnet: {
-      id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, privateEndpointSubnetName)
-    }
-    privateLinkServiceConnections: [
-      {
-        name: 'plsc-keyvault-${environment}'
-        properties: {
-          privateLinkServiceId: keyVaultId
-          groupIds: ['vault']
-        }
-      }
-    ]
+resource "azurerm_private_endpoint" "key_vault" {
+  count               = var.enable_private_endpoints ? 1 : 0
+  name                = "pe-keyvault-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  subnet_id           = var.private_endpoint_subnet_id
+
+  private_service_connection {
+    name                           = "plsc-keyvault-${var.environment}"
+    private_connection_resource_id = var.key_vault_id
+    subresource_names              = ["vault"]
+    is_manual_connection           = false
   }
-}
 
-// --- Private DNS Zones (created only when endpoints are enabled) ---
-resource storageDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = if (enablePrivateEndpoints) {
-  name: 'privatelink.dfs.core.windows.net'
-  location: 'global'
-}
-
-resource kvDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = if (enablePrivateEndpoints) {
-  name: 'privatelink.vaultcore.azure.net'
-  location: 'global'
+  private_dns_zone_group {
+    name                 = "dns-zone-group-keyvault"
+    private_dns_zone_ids = [azurerm_private_dns_zone.key_vault[0].id]
+  }
 }
 ```
 
@@ -525,7 +505,7 @@ jobs:
         with:
           extra_args: --only-verified
 
-  checkov-bicep-scan:
+  checkov-terraform-scan:
     name: IaC Security Misconfiguration (Checkov)
     runs-on: ubuntu-latest
     steps:
@@ -540,9 +520,9 @@ jobs:
       - name: Install Checkov
         run: pip install checkov
 
-      - name: Run Checkov Bicep Scan
+      - name: Run Checkov Terraform Scan
         run: |
-          checkov -d ./infrastructure --framework bicep \
+          checkov -d ./infrastructure --framework terraform \
             --skip-check CKV_AZURE_33,CKV_AZURE_35 \
             --output cli --output junitxml --output-file-path console,results.xml
 
@@ -893,7 +873,7 @@ echo "============================================================"
 ## 5. CI/CD Security Gates
 Every PR is scanned by 4 automated security checks:
 1. **TruffleHog:** Verified secret leak detection across git history.
-2. **Checkov:** Bicep IaC misconfiguration scanning.
+2. **Checkov:** Terraform IaC misconfiguration scanning.
 3. **Bandit:** Python SAST for hardcoded secrets and insecure patterns.
 4. **pip-audit:** Dependency vulnerability scanning against CVE databases.
 ```
@@ -910,7 +890,7 @@ Every PR is scanned by 4 automated security checks:
 
 | # | Category | Check | Owner | Status |
 |---|---|---|---|---|
-| 1 | Infrastructure | All Bicep modules deploy successfully | Platform Team | ☐ |
+| 1 | Infrastructure | All Terraform modules deploy successfully | Platform Team | ☐ |
 | 2 | Infrastructure | Key Vault secrets populated and rotated | Platform Team | ☐ |
 | 3 | Data Pipeline | Bronze → Silver → Gold Medallion pipeline processes IEEE-CIS dataset | Data Engineering | ☐ |
 | 4 | Data Pipeline | Streaming pipeline ingests Event Hubs events and writes to Silver Delta | Data Engineering | ☐ |
@@ -946,9 +926,9 @@ Every PR is scanned by 4 automated security checks:
 fraud-detection-platform/
 ├── infrastructure/
 │   └── modules/
-│       ├── rbac-assignments.bicep               # [NEW] Entra ID RBAC with proper resource scoping
-│       ├── private-endpoints.bicep              # [NEW] ADLS + KV Private Endpoints with DNS Zones
-│       └── diagnostic-settings.bicep            # [NEW] Reusable centralized diagnostics module
+│       ├── rbac-assignments/main.tf              # [NEW] Entra ID RBAC with proper resource scoping
+│       ├── private-endpoints/main.tf             # [NEW] ADLS + KV Private Endpoints with DNS Zones
+│       └── diagnostic-settings/main.tf           # [NEW] Reusable centralized diagnostics module
 │
 ├── databricks/
 │   ├── governance/
@@ -983,12 +963,12 @@ fraud-detection-platform/
 |---|---|---|---|---|
 | 1 | Unity Catalog masking masks IP/Device | Execute `apply_data_masking_policies.sql` | Non-compliance roles see `xxx.xxx` IP, `****` device IDs | 🔴 Blocking |
 | 2 | SHA-256 salting hashes PII | Run `pii_masking.py` with `validate_pii_hashing()` | All IP/Device strings transformed to 64-char hashes | 🔴 Blocking |
-| 3 | Entra ID Managed Identity assigned | Deploy `rbac-assignments.bicep` | Databricks accesses ADLS without storage keys | 🔴 Blocking |
+| 3 | Entra ID Managed Identity assigned | Deploy `rbac-assignments` module | Databricks accesses ADLS without storage keys | 🔴 Blocking |
 | 4 | Key Vault secrets rotate (all 3) | Run `rotate_keyvault_secrets.py` | New secret versions created for all 3 secrets | 🟡 Warning |
-| 5 | Diagnostic settings capture logs | Deploy `diagnostic-settings.bicep` | `AzureDiagnostics` records appear in Log Analytics | 🔴 Blocking |
-| 6 | Private Endpoints deploy (when enabled) | Deploy `private-endpoints.bicep` with `enablePrivateEndpoints=true` | Private endpoints + DNS zones created | 🟡 Warning |
+| 5 | Diagnostic settings capture logs | Deploy `diagnostic-settings` module | `AzureDiagnostics` records appear in Log Analytics | 🔴 Blocking |
+| 6 | Private Endpoints deploy (when enabled) | Deploy `private-endpoints` module with `enable_private_endpoints=true` | Private endpoints + DNS zones created | 🟡 Warning |
 | 7 | TruffleHog scan passes | Run `security-scan.yml` | Zero verified secret leaks | 🔴 Blocking |
-| 8 | Checkov IaC scan passes | Run Checkov on `infrastructure/` | Zero critical Bicep security violations | 🔴 Blocking |
+| 8 | Checkov IaC scan passes | Run Checkov on `infrastructure/` | Zero critical Terraform security violations | 🔴 Blocking |
 | 9 | Bandit Python SAST passes | Run Bandit on `ml/`, `functions/`, `scripts/` | Zero high-severity findings | 🔴 Blocking |
 | 10 | pip-audit dependency scan passes | Run pip-audit on all requirements.txt | Zero critical CVEs in dependencies | 🟡 Warning |
 | 11 | Chaos: corrupted payload fallback | Run `test_resilience_scenarios.py::test_01` | Returns 200 with fallback decision | 🔴 Blocking |
@@ -1005,7 +985,7 @@ fraud-detection-platform/
 |---|---|---|---|---|
 | 1 | Governance Catalog | **Unity Catalog (Column Masking + Row Filters)** | Microsoft Purview Automated Lineage | Unity Catalog provides native masking without Purview cost |
 | 2 | PII Protection | **SHA-256 Hashing with Key Vault Salt + Validation** | Tokenization Service + HSM | Hashes PII at Bronze→Silver boundary with automated validation |
-| 3 | Network Security | **Service Firewalls + Azure IP Rules** | Private Endpoints + DNS Zones (`private-endpoints.bicep`) | Private endpoints cost ~$7.20/month per service |
+| 3 | Network Security | **Service Firewalls + Azure IP Rules** | Private Endpoints + DNS Zones (`private-endpoints` module) | Private endpoints cost ~$7.20/month per service |
 | 4 | Authentication | **Microsoft Entra ID Managed Identities** | Same | Zero hardcoded storage keys or database passwords |
 | 5 | Log Retention | **Log Analytics 30-Day Retention** | Log Analytics 365-Day Retention | 30 days is free; 365 days required for PCI compliance |
 | 6 | Security Automation | **4-Scan Pipeline (TruffleHog + Checkov + Bandit + pip-audit)** | Same + SonarQube Enterprise | Comprehensive secret, IaC, SAST, and CVE scanning |
@@ -1020,7 +1000,7 @@ fraud-detection-platform/
 | # | Component | Bug | Fix |
 |---|---|---|---|
 | 1 | `scripts/rotate_keyvault_secrets.py` | `rotate_secret()` generated a new random password and wrote it to Key Vault via `client.set_secret(...)`, but never changed the corresponding credential on the actual target system. For `db-admin-password-dev`/`sql-admin-password-dev`, that meant "rotation" made Key Vault hold a value that no longer matched the real Azure SQL Server admin password — every service authenticating with that secret would start failing immediately after a "successful" rotation run. This was the most severe bug found in the reviewed scripts: a rotation routine that breaks connectivity instead of rotating credentials safely. | Added `_update_sql_server_password()`, which updates the live Azure SQL Server admin login password via the `azure-mgmt-sql` ARM client (`servers.begin_update`) for the two secrets that mirror it (`SQL_SERVER_ADMIN_SECRETS`). The real server credential is updated *first* and Key Vault is only written to once that ARM call succeeds, so a failed rotation can never leave Key Vault out of sync with the live server. Added `azure-mgmt-sql` to `requirements.txt`. Note: `pii-hash-salt` is intentionally left untouched by this fix — it isn't a system credential, and rotating it has a different consequence (breaks matching of previously-hashed PII values) that's out of scope here. |
-| 2 | `infrastructure/modules/rbac-assignments.bicep` | Accepted a `decisionFunctionPrincipalId` parameter but never used it in any `roleAssignment` — per this phase's own §7.3 RBAC matrix, `id-decision-function` should get **Service Bus Data Sender** + **App Configuration Data Reader**, and `id-logic-app-workflow` should get **Service Bus Data Receiver** + **SQL DB Contributor**; none of these 4 assignments existed anywhere. The Decision Function/Logic App managed identities had no RBAC-based access, leaving them dependent on connection-string/SAS auth despite the platform's documented zero-trust managed-identity design. | Added a `logicAppPrincipalId` param and the 4 missing `roleAssignment` resources, scoped to the Service Bus namespace, App Configuration store, and SQL database respectively (new `existing` resource references added for those 3). **Flagged for verification**: the 4 new built-in role GUIDs were not validated against a live subscription — check `az role definition list --name "<role name>"` before first deployment. |
-| 3 | `infrastructure/modules/private-endpoints.bicep` | Created the private endpoints and private DNS zones when `enablePrivateEndpoints=true`, but never created a `privateDnsZoneGroup` linking each endpoint to its zone, nor a `virtualNetworkLinks` resource linking the zones to the VNet (the `vnetName` param was only used to build the subnet resource ID, never referenced by the DNS zone resources). Even with private endpoints enabled, DNS resolution for `*.blob.core.windows.net`/`*.vault.azure.net` would still resolve to public IPs from the VNet, defeating the point of the private endpoints. | Added `virtualNetworkLinks` for both zones and `privateDnsZoneGroups` for both endpoints, wiring the two together as Azure requires. |
+| 2 | `infrastructure/modules/rbac-assignments/main.tf` (originally found in the Bicep version of this module) | Accepted a `decisionFunctionPrincipalId` parameter but never used it in any role assignment — per this phase's own §7.3 RBAC matrix, `id-decision-function` should get **Service Bus Data Sender** + **App Configuration Data Reader**, and `id-logic-app-workflow` should get **Service Bus Data Receiver** + **SQL DB Contributor**; none of these 4 assignments existed anywhere. The Decision Function/Logic App managed identities had no RBAC-based access, leaving them dependent on connection-string/SAS auth despite the platform's documented zero-trust managed-identity design. | Fix carried forward into the Terraform rewrite: the module now takes `logic_app_principal_id` and defines all 6 `azurerm_role_assignment` resources shown in §7.3, scoped to the storage account, Key Vault, Service Bus namespace, App Configuration store, and SQL database respectively. Built-in roles are referenced by **name** (`role_definition_name`), not a hardcoded GUID, so the provider resolves and validates them against the live subscription at plan/apply time instead of failing silently on a stale ID. |
+| 3 | `infrastructure/modules/private-endpoints/main.tf` (originally found in the Bicep version of this module) | Created the private endpoints and private DNS zones when `enablePrivateEndpoints=true`, but never created a `privateDnsZoneGroup` linking each endpoint to its zone, nor a `virtualNetworkLinks` resource linking the zones to the VNet (the `vnetName` param was only used to build the subnet resource ID, never referenced by the DNS zone resources). Even with private endpoints enabled, DNS resolution for `*.blob.core.windows.net`/`*.vault.azure.net` would still resolve to public IPs from the VNet, defeating the point of the private endpoints. | Fix carried forward into the Terraform rewrite: `azurerm_private_dns_zone_virtual_network_link` resources link both zones to the VNet, and each `azurerm_private_endpoint` nests its own `private_dns_zone_group` block — the azurerm provider models the endpoint↔zone link as a nested attribute of the endpoint itself, so the two can't drift apart the way two independent Bicep resources could. |
 | 4 | `tests/chaos/test_resilience_scenarios.py` | Every `requests.post` call omitted the function key required by `functions/decision_engine/function_app.py`'s `http_auth_level=func.AuthLevel.FUNCTION` — every assertion in the suite would fail with 401 Unauthorized against a real deployment rather than exercising any actual resilience behavior. The module docstring also claimed 2 scenarios (Service Bus retry, connection pool exhaustion) that were never implemented — only 5 scenarios exist: corrupted payload, missing fields, sequential latency, concurrent storm, score boundaries. | Added `AUTH_HEADERS` (from a `DECISION_ENGINE_FUNCTION_KEY` env var) to all 5 requests. Corrected the docstring to describe only what's actually tested, rather than claiming untested coverage — deliberately did not fabricate the 2 missing scenarios without live Service Bus/SQL infrastructure to validate them against. |
 | 5 | `scripts/verify_platform_end_to_end.sh` | Steps 1-3 (Resource Group, Key Vault, Storage) exited on failure; steps 4-7 (Event Hubs, SQL, Service Bus, Function App) only printed status and never asserted anything — a partially-deployed platform could still print "ALL PLATFORM VERIFICATION STEPS COMPLETED!". The `APP_CONFIG` variable was declared but never used anywhere — App Configuration (holding the live fraud decision thresholds) was silently never verified at all. | Steps 4-7 now exit 1 on an unexpected status, matching steps 1-3's rigor. Added a new step verifying the 3 App Configuration threshold keys (`FraudEngine:{ApproveMax,StepUpMax,BlockMin}Threshold`) actually exist, using the previously-dead `APP_CONFIG` variable. Script is now 9 steps, not 8. |

@@ -10,36 +10,43 @@
 # a real App Configuration check (the APP_CONFIG variable was declared
 # but never used -- App Config holds the live fraud decision thresholds
 # and was silently never verified at all).
+#
+# Two more real bugs fixed against the actual live deployment (see
+# docs/execution-log/*.md): KV was "kv-fraud-dev" -- Key Vault names are
+# globally unique, and the real vault has a random suffix
+# ("kv-fraud-dev-4th9"). FUNC_APP was "func-decision-engine-dev" -- the
+# real Phase 5 Function App is "func-fraud-decision-dev" (same wrong
+# name already found and fixed in tests/chaos/test_resilience_scenarios.py).
 # ============================================================
 set -e
 
 RG="rg-fraud-detection-dev"
-KV="kv-fraud-dev"
+KV="kv-fraud-dev-4th9"
 EH_NS="ehns-fraud-dev"
 SQL_SERVER="sql-fraud-dev"
 STORAGE="stfraudlakedev"
 SB_NS="sbns-fraud-dev"
 APP_CONFIG="appcs-fraud-dev"
-FUNC_APP="func-decision-engine-dev"
+FUNC_APP="func-fraud-decision-dev"
 
 echo "============================================================"
 echo "  REAL-TIME FRAUD DETECTION PLATFORM — FULL VERIFICATION    "
 echo "============================================================"
 
 # Step 1: Verify Resource Group
-echo "[1/8] Verifying Resource Group..."
+echo "[1/9] Verifying Resource Group..."
 RG_STATUS=$(az group show --name $RG --query "properties.provisioningState" -o tsv 2>/dev/null || echo "MISSING")
 echo "  Resource Group: $RG_STATUS"
 [ "$RG_STATUS" = "Succeeded" ] || { echo "❌ FAIL: Resource Group not found"; exit 1; }
 
 # Step 2: Verify Key Vault Secrets
-echo "[2/8] Verifying Key Vault Secrets..."
+echo "[2/9] Verifying Key Vault Secrets..."
 SECRET_COUNT=$(az keyvault secret list --vault-name $KV --query "length(@)" -o tsv 2>/dev/null || echo "0")
 echo "  Key Vault Secrets Count: $SECRET_COUNT"
 [ "$SECRET_COUNT" -gt 0 ] || { echo "❌ FAIL: No secrets in Key Vault"; exit 1; }
 
 # Step 3: Verify ADLS Gen2 Storage
-echo "[3/8] Verifying ADLS Gen2 Storage Account..."
+echo "[3/9] Verifying ADLS Gen2 Storage Account..."
 STORAGE_STATUS=$(az storage account show --name $STORAGE --resource-group $RG --query "provisioningState" -o tsv 2>/dev/null || echo "MISSING")
 echo "  Storage Account: $STORAGE_STATUS"
 [ "$STORAGE_STATUS" = "Succeeded" ] || { echo "❌ FAIL: Storage account not found"; exit 1; }
@@ -51,10 +58,15 @@ echo "  Event Hubs: $EH_STATUS"
 [ "$EH_STATUS" = "Succeeded" ] || { echo "❌ FAIL: Event Hubs namespace not found"; exit 1; }
 
 # Step 5: Verify Azure SQL Database
+# "Paused" is a legitimate healthy state, not a failure -- the database is
+# GP_S_Gen5_1 serverless with a deliberate 60-min auto-pause (Phase 5 cost
+# saving; see infrastructure/modules/azure-sql/main.tf); it auto-resumes on
+# the next real query. A prior version of this check only accepted "Online",
+# which would false-fail any time the platform had simply been idle.
 echo "[5/9] Verifying Azure SQL Database Status..."
 SQL_STATUS=$(az sql db show --resource-group $RG --server $SQL_SERVER --name "sqldb-fraud-cases-dev" --query "status" -o tsv 2>/dev/null || echo "MISSING")
 echo "  Azure SQL: $SQL_STATUS"
-[ "$SQL_STATUS" = "Online" ] || { echo "❌ FAIL: Azure SQL database not online"; exit 1; }
+[ "$SQL_STATUS" = "Online" ] || [ "$SQL_STATUS" = "Paused" ] || { echo "❌ FAIL: Azure SQL database not online or paused"; exit 1; }
 
 # Step 6: Verify Service Bus Topic
 echo "[6/9] Verifying Service Bus Topic..."

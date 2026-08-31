@@ -30,7 +30,7 @@ class FraudEnsemblePyFunc(mlflow.pyfunc.PythonModel):
         import joblib
 
         self.xgb_model = joblib.load(context.artifacts["xgb_model"])
-        self.ae_model = torch.load(context.artifacts["ae_model"], weights_only=False)
+        self.ae_model = self._load_autoencoder(context.artifacts["ae_model"])
         self.ae_model.eval()
         self.ae_scaler = joblib.load(context.artifacts["ae_scaler"])
         self.iso_forest = joblib.load(context.artifacts["iso_forest"])
@@ -51,6 +51,38 @@ class FraudEnsemblePyFunc(mlflow.pyfunc.PythonModel):
 
         logger.info("FraudEnsemblePyFunc loaded. features=%d version=%s",
                     len(self.feature_names), self.model_version)
+
+    @staticmethod
+    def _load_autoencoder(path: str):
+        """
+        Loads the autoencoder artifact. Current training code (as of Phase 7's
+        security hardening pass) saves {"state_dict", "input_dim",
+        "bottleneck_dim"} -- a plain dict of tensors/ints -- and this is loaded
+        with weights_only=True (PyTorch's restricted unpickler, which can't
+        execute arbitrary code even if the artifact were tampered with).
+        Falls back to the legacy weights_only=False full-pickled-object format
+        for model versions registered before this fix (retraining will migrate
+        them to the safe format automatically going forward).
+        """
+        try:
+            checkpoint = torch.load(path, weights_only=True)
+            if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+                from fraud_detection.ml.training.models.autoencoder import FraudAutoencoder
+                model = FraudAutoencoder(
+                    input_dim=checkpoint["input_dim"],
+                    bottleneck_dim=checkpoint.get("bottleneck_dim", 32),
+                )
+                model.load_state_dict(checkpoint["state_dict"])
+                return model
+        except Exception as exc:
+            logger.warning("weights_only=True autoencoder load failed (%s); "
+                            "falling back to legacy format.", exc)
+
+        logger.warning("Loading autoencoder artifact with weights_only=False "
+                        "(legacy pre-Phase-7 format) — only safe because this "
+                        "artifact comes from our own trusted training pipeline, "
+                        "not an untrusted upload.")
+        return torch.load(path, weights_only=False)
 
     def _validate_and_coerce(self, model_input) -> np.ndarray:
         """

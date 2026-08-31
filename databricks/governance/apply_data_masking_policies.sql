@@ -2,6 +2,14 @@
 -- Unity Catalog Data Governance & Masking Policies
 -- Restricts PII (IP, Device ID, Customer Details) for non-privileged roles.
 -- Compliance Officers see unmasked data; Analysts see masked data.
+--
+-- Production fix applied: ALTER TABLE originally targeted
+-- silver.transactions, the Phase 1 static IEEE-CIS batch table -- it has
+-- no ip_address/device_id columns at all (uses device_type/device_info
+-- instead). silver.streaming_transactions (the live-replay table) is the
+-- one that actually carries ip_address/device_id -- same class of bug
+-- already fixed in ml/training/data_preparation.py and
+-- databricks/notebooks/mlops/ingest_chargeback_feedback.py this session.
 -- ============================================================
 
 USE CATALOG fraud_detection_dev;
@@ -30,12 +38,12 @@ RETURN CASE
     ELSE CONCAT(SUBSTRING(email, 1, 2), '***@', REGEXP_EXTRACT(email, '@(.+)$', 1))
 END;
 
--- 4. Apply Column Masking Policies on Silver Transactions Table
-ALTER TABLE silver.transactions ALTER COLUMN ip_address SET MASK mask_ip_address;
-ALTER TABLE silver.transactions ALTER COLUMN device_id SET MASK mask_device_id;
+-- 4. Apply Column Masking Policies on Silver Streaming Transactions Table
+ALTER TABLE silver.streaming_transactions ALTER COLUMN ip_address SET MASK mask_ip_address;
+ALTER TABLE silver.streaming_transactions ALTER COLUMN device_id SET MASK mask_device_id;
 
 -- 5. Grant Role-Based Table Access Controls (RBAC)
-GRANT SELECT ON TABLE silver.transactions TO `fraud-analysts`;
+GRANT SELECT ON TABLE silver.streaming_transactions TO `fraud-analysts`;
 GRANT SELECT ON SCHEMA gold TO `fraud-analysts`;
 
 GRANT SELECT, MODIFY ON SCHEMA silver TO `data-engineers`;

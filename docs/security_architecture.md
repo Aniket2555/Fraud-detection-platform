@@ -2,10 +2,10 @@
 
 ## 1. Network Security
 - **Dev (Free Trial):** Service-level firewalls with Azure IP allowlisting. Public endpoints enabled.
-- **Production:** Private Endpoints with Private DNS Zones for ADLS Gen2, Key Vault, Azure SQL, Service Bus (`private-endpoints.bicep`). VNet-injected Databricks workspace.
+- **Production:** Private Endpoints with Private DNS Zones for ADLS Gen2, Key Vault, Azure SQL, Service Bus (`infrastructure/modules/private-endpoints`). VNet-injected Databricks workspace.
 
 ## 2. Identity & Access Management
-- **Zero Hardcoded Credentials:** All service-to-service auth uses Microsoft Entra ID Managed Identities (`rbac-assignments.bicep`).
+- **Zero Hardcoded Credentials:** All service-to-service auth uses Microsoft Entra ID Managed Identities (`infrastructure/modules/rbac-assignments`).
 - **User Auth:** Microsoft Entra ID groups (`fraud-analysts`, `data-engineers`, `platform-admins`, `ml-engineers`).
 - **Data RBAC:** Unity Catalog column masking (`apply_data_masking_policies.sql`) + row filters for PII protection.
 
@@ -22,6 +22,6 @@
 ## 5. CI/CD Security Gates
 Every PR is scanned by 4 automated security checks (`security-scan.yml`):
 1. **TruffleHog:** Verified secret leak detection across git history.
-2. **Checkov:** Bicep IaC misconfiguration scanning.
+2. **Checkov:** Terraform IaC misconfiguration scanning.
 3. **Bandit:** Python SAST for hardcoded secrets and insecure patterns.
 4. **pip-audit:** Dependency vulnerability scanning against CVE databases.

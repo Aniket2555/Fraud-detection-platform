@@ -43,6 +43,7 @@ azure-storage-file-datalake>=12.15.0
 azure-identity>=1.16.0
 azure-keyvault-secrets>=4.8.0
 azure-mgmt-sql>=3.0.1             # Used by scripts/rotate_keyvault_secrets.py to update the live SQL admin password on rotation
+azure-mgmt-resource>=23.0.0        # Used by scripts/rotate_keyvault_secrets.py to resolve the real (randomly-suffixed) Key Vault name
 
 # ── Explainability ───────────────────────────────────────────
 matplotlib>=3.8.0

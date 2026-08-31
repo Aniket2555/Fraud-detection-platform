@@ -80,7 +80,16 @@ def run_training_pipeline(spark):
             artifacts_dir = "/tmp/ensemble_artifacts"
             os.makedirs(artifacts_dir, exist_ok=True)
             joblib.dump(xgb_model, f"{artifacts_dir}/xgb_model.pkl")
-            torch.save(ae_model, f"{artifacts_dir}/ae_model.pt")
+            # Safe format (state_dict, not the full pickled object) -- see the
+            # matching comment in databricks/notebooks/mlops/retrain_pipeline.py.
+            torch.save(
+                {
+                    "state_dict": ae_model.state_dict(),
+                    "input_dim": len(feature_cols),
+                    "bottleneck_dim": ae_model.encoder[-2].out_features,
+                },
+                f"{artifacts_dir}/ae_model.pt",
+            )
             joblib.dump(ae_scaler, f"{artifacts_dir}/ae_scaler.pkl")
             joblib.dump(iso_model, f"{artifacts_dir}/iso_forest.pkl")
             joblib.dump(cal_xgb, f"{artifacts_dir}/cal_xgb.pkl")

@@ -26,30 +26,7 @@
 
 ## Phase 2 Internal Dependency Graph
 
-```mermaid
-graph TD
-    A["2.1 Event Hubs\nInfrastructure (Bicep)"] --> B["2.2 Canonical Event\nSchema Design"]
-    A --> C["2.3 Key Vault\nSecret Updates"]
-    B --> D["2.4 Transaction Stream\nProducer"]
-    C --> D
-    C --> E["2.5 Bronze Streaming\nIngestion"]
-    B --> E
-    A --> E
-    D --> F["2.6 DLQ / Dead Letter\nHandler"]
-    E --> F
-    D --> G["2.7 Late-Arrival\nMeasurement"]
-    E --> G
-    D --> H["2.8 Partition Skew\nAnalysis"]
-    E --> H
-    G --> I["2.9 Exactly-Once\nValidation"]
-    H --> I
-    F --> I
-    I --> J["2.10 End-to-End\nPhase 2 Validation"]
-
-    style A fill:#e3f2fd,stroke:#1976d2
-    style D fill:#fff3e0,stroke:#f57c00
-    style E fill:#e8f5e9,stroke:#4caf50
-```
+![alt text](image-2.png)
 
 ---
 
@@ -104,110 +81,85 @@ graph TD
 > [!IMPORTANT]
 > **Capture is your disaster recovery path.** If the Databricks streaming job goes down for hours, Capture's Avro files accumulate in ADLS. Recovery is: point Auto Loader at `eventhubs-capture/` and backfill Bronze from Avro instead of the live stream. Document this runbook step in `docs/runbooks/streaming_recovery.md`.
 
-### 2.1.4 Bicep Template: Event Hubs
+### 2.1.4 Terraform Module: Event Hubs
 
-#### `infrastructure/modules/eventhubs.bicep`
+#### `infrastructure/modules/eventhubs/main.tf`
 
-```bicep
-@description('Environment name — dev only for Free Trial')
-param environment string = 'dev'
+```hcl
+resource "azurerm_eventhub_namespace" "this" {
+  name                = "ehns-fraud-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
 
-@description('Location')
-param location string
+  sku      = "Standard" # Free Trial: Standard ($11/month base)
+  capacity = 1          # 1 TU -- sufficient for dev throughput
 
-param projectName string = 'fraud-detection'
+  auto_inflate_enabled           = false # Free Trial: disabled (cost control)
+  public_network_access_enabled  = true  # Free Trial: no private endpoints
+  local_authentication_enabled   = true  # Allow SAS auth (simpler for Free Trial)
 
-@description('ADLS Gen2 storage account resource ID (for Capture)')
-param storageAccountId string
-
-@description('ADLS Gen2 storage account name (for Capture container)')
-param storageAccountName string
-
-var namespaceName = 'ehns-fraud-${environment}'
-var eventHubName = 'eh-transactions'
-
-// --- Event Hubs Namespace ---
-resource ehNamespace 'Microsoft.EventHub/namespaces@2024-01-01' = {
-  name: namespaceName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
-  }
-  sku: {
-    name: 'Standard'          // Free Trial: Standard ($11/month base)
-    tier: 'Standard'
-    capacity: 1               // 1 TU — sufficient for dev throughput
-  }
-  properties: {
-    isAutoInflateEnabled: false  // Free Trial: disabled (cost control)
-    maximumThroughputUnits: 0
-    publicNetworkAccess: 'Enabled'  // Free Trial: no private endpoints
-    disableLocalAuth: false    // Allow SAS auth (simpler for Free Trial)
-    zoneRedundant: false       // Free Trial: no zone redundancy
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
 
-// --- Event Hub: Transactions ---
-resource eventHub 'Microsoft.EventHub/namespaces/eventhubs@2024-01-01' = {
-  parent: ehNamespace
-  name: eventHubName
-  properties: {
-    partitionCount: 4          // Free Trial: 4 partitions (Standard max: 32)
-    messageRetentionInDays: 1  // Free Trial: minimum retention (free)
-    captureDescription: {
-      enabled: true            // Always-on Capture for disaster recovery
-      encoding: 'Avro'
-      intervalInSeconds: 900   // 15-minute window (minimizes write cost)
-      sizeLimitInBytes: 314572800  // 300 MB window
-      skipEmptyArchives: true  // Don't write empty Avro files
-      destination: {
-        name: 'EventHubArchive.AzureBlockBlob'
-        properties: {
-          storageAccountResourceId: storageAccountId
-          blobContainer: 'eventhubs-capture'
-          archiveNameFormat: '{Namespace}/{EventHub}/{PartitionId}/{Year}/{Month}/{Day}/{Hour}/{Minute}/{Second}'
-        }
-      }
+resource "azurerm_eventhub" "transactions" {
+  name              = "eh-transactions"
+  namespace_id      = azurerm_eventhub_namespace.this.id
+  partition_count   = 4 # Free Trial: 4 partitions (Standard tier max: 32)
+  message_retention = 1 # Free Trial: minimum retention (free)
+
+  capture_description {
+    enabled             = true # Always-on Capture for disaster recovery
+    encoding            = "Avro"
+    interval_in_seconds = 900       # 15-minute window (minimizes write cost)
+    size_limit_in_bytes = 314572800 # 300 MB window
+    skip_empty_archives = true      # Don't write empty Avro files
+
+    destination {
+      name                = "EventHubArchive.AzureBlockBlob"
+      archive_name_format = "{Namespace}/{EventHub}/{PartitionId}/{Year}/{Month}/{Day}/{Hour}/{Minute}/{Second}"
+      blob_container_name = "eventhubs-capture"
+      storage_account_id  = var.storage_account_id
     }
   }
 }
 
-// --- Consumer Groups ---
-resource defaultConsumerGroup 'Microsoft.EventHub/namespaces/eventhubs/consumergroups@2024-01-01' = {
-  parent: eventHub
-  name: '$Default'
+# NOTE: "$Default" is not declared as a resource -- Azure creates it
+# automatically with every Event Hub, and azurerm_eventhub_consumer_group's
+# name validation rejects the literal string "$Default" anyway.
+resource "azurerm_eventhub_consumer_group" "bronze_ingest" {
+  name                = "bronze-ingest"
+  namespace_name      = azurerm_eventhub_namespace.this.name
+  eventhub_name       = azurerm_eventhub.transactions.name
+  resource_group_name = var.resource_group_name
 }
 
-resource bronzeConsumerGroup 'Microsoft.EventHub/namespaces/eventhubs/consumergroups@2024-01-01' = {
-  parent: eventHub
-  name: 'bronze-ingest'
+# --- Authorization Rules (least privilege: separate send-only / listen-only) ---
+resource "azurerm_eventhub_authorization_rule" "producer_send" {
+  name                = "producer-send-rule"
+  namespace_name      = azurerm_eventhub_namespace.this.name
+  eventhub_name       = azurerm_eventhub.transactions.name
+  resource_group_name = var.resource_group_name
+  send   = true
+  listen = false
+  manage = false
 }
 
-// --- Authorization Rule: Producer (Send only) ---
-resource producerAuthRule 'Microsoft.EventHub/namespaces/eventhubs/authorizationRules@2024-01-01' = {
-  parent: eventHub
-  name: 'producer-send-rule'
-  properties: {
-    rights: ['Send']           // Least privilege: producer can only send
-  }
+resource "azurerm_eventhub_authorization_rule" "consumer_listen" {
+  name                = "consumer-listen-rule"
+  namespace_name      = azurerm_eventhub_namespace.this.name
+  eventhub_name       = azurerm_eventhub.transactions.name
+  resource_group_name = var.resource_group_name
+  send   = false
+  listen = true
+  manage = false
 }
-
-// --- Authorization Rule: Consumer (Listen only) ---
-resource consumerAuthRule 'Microsoft.EventHub/namespaces/eventhubs/authorizationRules@2024-01-01' = {
-  parent: eventHub
-  name: 'consumer-listen-rule'
-  properties: {
-    rights: ['Listen']         // Least privilege: consumer can only receive
-  }
-}
-
-output namespaceName string = ehNamespace.name
-output eventHubName string = eventHub.name
-output producerConnectionString string = producerAuthRule.listKeys().primaryConnectionString
-output consumerConnectionString string = consumerAuthRule.listKeys().primaryConnectionString
 ```
+
+`outputs.tf` exposes `namespace_id`, `namespace_name`, `eventhub_name`, and the two connection strings (both marked `sensitive = true`, unlike the Bicep version's plaintext outputs).
 
 ### 2.1.5 Key Vault Secret Updates (Post Event Hubs Deployment)
 
@@ -221,7 +173,7 @@ After deploying Event Hubs, store connection strings in Key Vault:
 | `eventhub-name` | `eh-transactions` | All consumers |
 
 ```bash
-# Store Event Hubs secrets in Key Vault (run after Bicep deployment)
+# Store Event Hubs secrets in Key Vault (run after `terraform apply`)
 PRODUCER_CONN=$(az eventhubs eventhub authorization-rule keys list \
   --resource-group rg-fraud-detection-dev \
   --namespace-name ehns-fraud-dev \
@@ -1564,7 +1516,7 @@ print(f"Silver streaming merge started: {silver_query.status}")
 fraud-detection-platform/
 ├── infrastructure/
 │   └── modules/
-│       └── eventhubs.bicep                     # [NEW] Event Hubs namespace + hub + auth rules + capture
+│       └── eventhubs/                           # [NEW] Event Hubs namespace + hub + auth rules + capture
 │
 ├── schemas/
 │   ├── transaction_event_v1.json               # [NEW] Canonical event JSON Schema

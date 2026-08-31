@@ -13,20 +13,7 @@
 
 ## Phase 1 Internal Dependency Graph
 
-```mermaid
-graph TD
-    A["1.1 Dataset Analysis\n& Schema Design"] --> B["1.2 Data Acquisition\n& ADF Landing"]
-    B --> C["1.3 Bronze Layer\n(Auto Loader)"]
-    C --> D["1.4 Data Quality Gate\n(PyDeequ)"]
-    D --> E["1.5 Silver Layer\n(Clean & Conform)"]
-    E --> F["1.6 Silver Validation\n& Quarantine"]
-    F --> G["1.7 Gold Layer\n(Aggregations)"]
-    E --> H["1.8 Feature Engineering\n(Batch)"]
-    H --> I["1.9 Model Training\n(XGBoost Baseline)"]
-    I --> J["1.10 Model Evaluation\n& Registry"]
-    G --> K["1.11 End-to-End\nValidation"]
-    J --> K
-```
+![alt text](image-1.png)
 
 ---
 
