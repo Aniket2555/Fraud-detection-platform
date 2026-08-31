@@ -41,6 +41,7 @@ _threshold_cache: dict = {
     "_last_refresh": 0.0,
 }
 _cache_lock = threading.RLock()
+_refresh_in_progress = False  # guarded by _cache_lock
 CACHE_TTL_SECONDS = 60
 
 TOPIC_NAME = os.environ.get("SERVICE_BUS_TOPIC_NAME", "sb-topic-fraud-events")
@@ -63,16 +64,13 @@ def _get_app_config_client():
     return _app_config_client
 
 
-def _get_thresholds() -> dict:
-    """Returns cached decision thresholds; refreshes from App Config if TTL expired.
-    Thread-safe: uses RLock to prevent concurrent refreshes corrupting the cache.
+def _refresh_thresholds_from_app_config() -> None:
+    """Blocking App Config fetch. Only ever called either synchronously on
+    the very first cold-start load, or on a background thread for every
+    later TTL-expiry refresh — never inline in a request that's just serving
+    from cache (see _get_thresholds).
     """
-    now = time.monotonic()
-    with _cache_lock:
-        if now - _threshold_cache["_last_refresh"] <= CACHE_TTL_SECONDS:
-            return dict(_threshold_cache)  # return a snapshot copy
-
-    # Refresh outside the lock to avoid blocking all threads during I/O
+    global _refresh_in_progress
     try:
         client = _get_app_config_client()
         if client:
@@ -88,6 +86,39 @@ def _get_thresholds() -> dict:
                         approve_max, step_up_max, block_min)
     except Exception as exc:
         logger.warning("App Config refresh failed — using stale cached values. error=%s", exc)
+    finally:
+        with _cache_lock:
+            _refresh_in_progress = False
+
+
+def _get_thresholds() -> dict:
+    """Returns cached decision thresholds; refreshes from App Config if TTL expired.
+
+    A request that lands right after the 60-second TTL expires has no
+    business blocking on App Config's network round-trip just because it was
+    the unlucky one to notice the stale cache — it kicks off a background
+    refresh and immediately returns the (about-to-be-updated) cached
+    snapshot instead. Only the very first cold-start call (no cached value
+    to serve yet) blocks synchronously. Previously every TTL-expiry refresh
+    was synchronous inline, which added ~179ms to 1-2 of every 100
+    sequential requests whenever a run happened to straddle a refresh
+    boundary (docs/execution-log/09-governance-security.md, chaos test_03).
+    Thread-safe: _cache_lock guards all reads/writes to the cache dict and
+    the _refresh_in_progress flag.
+    """
+    global _refresh_in_progress
+    now = time.monotonic()
+    with _cache_lock:
+        is_cold_start = _threshold_cache["_last_refresh"] == 0.0
+        is_stale = now - _threshold_cache["_last_refresh"] > CACHE_TTL_SECONDS
+        start_background_refresh = is_stale and not is_cold_start and not _refresh_in_progress
+        if start_background_refresh:
+            _refresh_in_progress = True
+
+    if is_cold_start:
+        _refresh_thresholds_from_app_config()
+    elif start_background_refresh:
+        threading.Thread(target=_refresh_thresholds_from_app_config, daemon=True).start()
 
     with _cache_lock:
         return dict(_threshold_cache)
