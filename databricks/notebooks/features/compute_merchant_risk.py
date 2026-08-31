@@ -13,16 +13,18 @@ from pyspark.sql.functions import (
 )
 from delta.tables import DeltaTable
 
-silver_df = spark.table("fraud_detection_dev.silver.transactions")
+# See compute_behavioral_baselines.py -- merchant_id/amount only exist in
+# the Event Hub-streamed dataset, not the Phase 1 IEEE-CIS batch table.
+silver_df = spark.table("fraud_detection_dev.silver.streaming_transactions")
 
 merchant_df = (
     silver_df
-    .filter(datediff(current_date(), col("event_date")) <= 30)
+    .filter(datediff(current_date(), col("event_time_ts")) <= 30)
     .groupBy("merchant_id")
     .agg(
         avg("amount").alias("merch_avg_ticket_30d"),
         count("transaction_id").alias("merch_txn_count_30d"),
-        ssum(when(col("is_fraud") == 1, 1).otherwise(0)).alias("merch_fraud_count_30d"),
+        ssum(when(col("is_fraud") == True, 1).otherwise(0)).alias("merch_fraud_count_30d"),
         count("transaction_id").alias("merch_total_count_30d")
     )
     .withColumn(

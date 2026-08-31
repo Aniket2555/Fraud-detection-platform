@@ -12,7 +12,9 @@ from pyspark.sql.functions import col, lit, current_timestamp, current_date
 from delta.tables import DeltaTable
 from graphframes import GraphFrame
 
-silver = spark.table("fraud_detection_dev.silver.transactions")
+# customer_id/card_id/device_id only exist in the Event Hub-streamed
+# dataset, not the Phase 1 IEEE-CIS batch table.
+silver = spark.table("fraud_detection_dev.silver.streaming_transactions")
 
 cust_vertices = silver.select(col("customer_id").alias("id")).distinct().withColumn("type", lit("customer"))
 card_vertices = silver.select(col("card_id").alias("id")).distinct().withColumn("type", lit("card"))
@@ -43,7 +45,15 @@ gf = GraphFrame(vertices, edges)
 pagerank_results = gf.pageRank(resetProbability=0.15, maxIter=5)
 degree_df = gf.degrees
 
-spark.sparkContext.setCheckpointDir("abfss://checkpoints@stfraudlakedev.dfs.core.windows.net/graphframes/")
+# sparkContext.setCheckpointDir() is a raw Hadoop-FileSystem RDD checkpoint
+# (needed by connectedComponents() to truncate lineage) -- it bypasses Unity
+# Catalog's external-location/credential system entirely, needs classic
+# storage-account-key auth for abfss:// (not configured here, DBFS root is
+# disabled), and Databricks doesn't support UC Volumes for this specific
+# low-level API either. Local disk works because this cluster is
+# single-node (num_workers=0) -- driver and "executor" are the same
+# machine, so there's no need for a distributed/shared filesystem here.
+spark.sparkContext.setCheckpointDir("file:///tmp/graphframes-checkpoints/")
 cc_results = gf.connectedComponents()
 
 graph_metrics = (

@@ -34,8 +34,19 @@ def apply_silver_transforms(df):
 
 silver_stream = apply_silver_transforms(bronze_stream)
 
+# Deliberately NOT fraud_detection_dev.silver.transactions -- that table holds
+# the Phase 1 IEEE-CIS batch dataset (columns like transaction_amt, card4,
+# v1-v339) used to train the baseline model. This streaming path ingests a
+# different dataset (the Event Hub-replayed ULB Kaggle data, with an
+# incompatible schema -- amount, merchant_category, event_time_ts, etc.).
+# Merging the two into one table would corrupt the baseline's training data.
+SILVER_STREAMING_TABLE = "fraud_detection_dev.silver.streaming_transactions"
+
 def merge_to_silver(batch_df, batch_id):
-    silver_table = DeltaTable.forName(spark, "fraud_detection_dev.silver.transactions")
+    if not spark.catalog.tableExists(SILVER_STREAMING_TABLE):
+        batch_df.write.format("delta").saveAsTable(SILVER_STREAMING_TABLE)
+        return
+    silver_table = DeltaTable.forName(spark, SILVER_STREAMING_TABLE)
     (silver_table.alias("target")
         .merge(batch_df.alias("source"), "target.transaction_id = source.transaction_id")
         .whenNotMatchedInsertAll()

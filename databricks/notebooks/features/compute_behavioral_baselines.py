@@ -16,11 +16,15 @@ from pyspark.sql.functions import (
 )
 from delta.tables import DeltaTable
 
-silver_df = spark.table("fraud_detection_dev.silver.transactions")
+# The customer/card/merchant entity model (customer_id, card_id, amount,
+# event_time_ts) only exists in the Event Hub-streamed dataset, not in
+# fraud_detection_dev.silver.transactions (the Phase 1 IEEE-CIS batch table,
+# which has no customer_id/merchant_id at all).
+silver_df = spark.table("fraud_detection_dev.silver.streaming_transactions")
 
 baseline_df = (
     silver_df
-    .filter(datediff(current_date(), col("event_date")) <= 90)
+    .filter(datediff(current_date(), col("event_time_ts")) <= 90)
     .groupBy("customer_id")
     .agg(
         avg("amount").alias("base_cust_90d_avg_amount"),

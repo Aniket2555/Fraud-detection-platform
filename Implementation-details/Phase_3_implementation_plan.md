@@ -23,27 +23,7 @@
 
 ## Phase 3 Internal Dependency Graph
 
-```mermaid
-graph TD
-    A["3.1 Feature Taxonomy\n& Schema Design"] --> B["3.2 Stateless Feature\nTransformers"]
-    A --> C["3.3 Stateful Velocity\nStream Processing"]
-    A --> D["3.4 Geo-Velocity\n& Impossible Travel"]
-    B --> E["3.5 Feature Store\nMaterialization (Offline/Online)"]
-    C --> E
-    D --> E
-    A --> F["3.6 Graph Features\n(Cosmos DB & GraphFrames)"]
-    F --> E
-    E --> G["3.7 Point-in-Time\nJoin Engine"]
-    G --> H["3.8 Online/Offline\nConsistency Verification"]
-    H --> I["3.9 Late-Arrival\n& Freshness Monitoring"]
-    A --> J["3.10 Merchant Risk\nBaseline Features"]
-    J --> E
-    I --> K["3.11 End-to-End\nPhase 3 Validation"]
-
-    style E fill:#e8f5e9,stroke:#4caf50
-    style G fill:#fff3e0,stroke:#f57c00
-    style F fill:#e3f2fd,stroke:#1976d2
-```
+![alt text](image-3.png)
 
 ---
 
@@ -706,84 +686,60 @@ Graph computation is split into two tiers:
                     └───────────────────────────┘
 ```
 
-### 3.7.1 Tier 1: Cosmos DB Gremlin API Setup (Bicep)
+### 3.7.1 Tier 1: Cosmos DB Gremlin API Setup (Terraform)
 
-#### `infrastructure/modules/cosmos-db.bicep`
+#### `infrastructure/modules/cosmos-db/main.tf`
 
-```bicep
-@description('Environment name')
-param environment string = 'dev'
+```hcl
+resource "azurerm_cosmosdb_account" "this" {
+  name                = "cosmos-fraud-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  offer_type          = "Standard"
+  kind                = "GlobalDocumentDB"
 
-@description('Location')
-param location string
+  capabilities { name = "EnableGremlin" }
+  capabilities { name = "EnableServerless" } # Free Trial: Serverless SKU (pay per RU consumed)
 
-param projectName string = 'fraud-detection'
-
-var accountName = 'cosmos-fraud-${environment}'
-var databaseName = 'graph-fraud-db'
-var graphName = 'entity-graph'
-
-resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2023-11-15' = {
-  name: accountName
-  location: location
-  kind: 'GlobalDocumentDB'
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
+  consistency_policy {
+    consistency_level = "Session" # Free Trial: minimal consistency for cost savings
   }
-  properties: {
-    capabilities: [
-      { name: 'EnableGremlin' }
-      { name: 'EnableServerless' } // Free Trial: Serverless SKU (pay per RU consumed)
-    ]
-    databaseAccountOfferType: 'Standard'
-    locations: [
-      {
-        locationName: location
-        failoverPriority: 0
-      }
-    ]
-    // Free Trial: minimal consistency for cost savings
-    consistencyPolicy: {
-      defaultConsistencyLevel: 'Session'
-    }
+
+  geo_location {
+    location          = var.location
+    failover_priority = 0
+  }
+
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
 
-resource gremlinDb 'Microsoft.DocumentDB/databaseAccounts/gremlinDatabases@2023-11-15' = {
-  parent: cosmosAccount
-  name: databaseName
-  properties: {
-    resource: {
-      id: databaseName
-    }
-  }
+resource "azurerm_cosmosdb_gremlin_database" "this" {
+  name                = "graph-fraud-db"
+  resource_group_name = var.resource_group_name
+  account_name        = azurerm_cosmosdb_account.this.name
 }
 
-resource gremlinGraph 'Microsoft.DocumentDB/databaseAccounts/gremlinDatabases/graphs@2023-11-15' = {
-  parent: gremlinDb
-  name: graphName
-  properties: {
-    resource: {
-      id: graphName
-      partitionKey: {
-        paths: ['/partitionKey']
-        kind: 'Hash'
-      }
-      indexingPolicy: {
-        indexingMode: 'consistent'
-        includedPaths: [{ path: '/*' }]
-        excludedPaths: [{ path: '/"_etag"/?' }]
-      }
-    }
+resource "azurerm_cosmosdb_gremlin_graph" "entity_graph" {
+  name                = "entity-graph"
+  resource_group_name = var.resource_group_name
+  account_name        = azurerm_cosmosdb_account.this.name
+  database_name       = azurerm_cosmosdb_gremlin_database.this.name
+  partition_key_path  = "/partitionKey"
+
+  index_policy {
+    automatic      = true
+    indexing_mode  = "consistent"
+    included_paths = ["/*"]
+    excluded_paths = ["/\"_etag\"/?"]
   }
 }
-
-output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
-output databaseName string = databaseName
-output graphName string = graphName
 ```
+
+`outputs.tf` exposes `cosmos_endpoint`, `cosmos_account_id`, `database_name`, `graph_name`, and `primary_key` (marked `sensitive = true`). No `throughput` block is set on the graph resource since the account is serverless — setting one would conflict with `EnableServerless`.
 
 ### 3.7.2 Cosmos DB Edge Writer (Streaming)
 
@@ -1341,7 +1297,7 @@ print("✅ Monitoring metrics logged.")
 fraud-detection-platform/
 ├── infrastructure/
 │   └── modules/
-│       └── cosmos-db.bicep                              # [NEW] Azure Cosmos DB Gremlin API (Serverless)
+│       └── cosmos-db/                                    # [NEW] Azure Cosmos DB Gremlin API (Serverless)
 │
 ├── databricks/
 │   ├── src/
@@ -1395,7 +1351,7 @@ fraud-detection-platform/
 | 6 | Impossible travel rule triggers | Feed test event with >900 km/h speed | `geo_flag_impossible_travel == 1` | 🔴 Blocking |
 | 7 | Customer baseline table populated | Query `gold.customer_behavioral_baselines` | 7 features including median and tenure populated | 🔴 Blocking |
 | 8 | Merchant risk baselines computed | Query `gold.merchant_risk_baselines` | `merch_fraud_ratio_30d` populated | 🔴 Blocking |
-| 9 | Cosmos DB Bicep deploys | `az deployment group create ...` | Gremlin account created (Serverless) | 🟡 Warning |
+| 9 | Cosmos DB Terraform module applies | `terraform apply` (part of the root module, or `-target=module.cosmos_db`) | Gremlin account created (Serverless) | 🟡 Warning |
 | 10 | GraphFrames produces PageRank + CC | Query `gold.graph_entity_metrics` | PageRank, degree_centrality, community_id all present | 🟡 Warning |
 | 11 | PIT join — zero future leakage | Run `test_feature_consistency.py` TEST 1 | `leakage_count == 0` | 🔴 Blocking |
 | 12 | PIT join — new entity returns NULL | Run `test_feature_consistency.py` TEST 2 | New card_id returns NULL features | 🔴 Blocking |
