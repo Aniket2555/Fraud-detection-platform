@@ -2,7 +2,7 @@
 <!-- What does this PR do? -->
 
 ## Type of Change
-- [ ] Infrastructure (Bicep/Terraform)
+- [ ] Infrastructure (Terraform)
 - [ ] Data pipeline (PySpark/ADF)
 - [ ] ML model/training
 - [ ] CI/CD

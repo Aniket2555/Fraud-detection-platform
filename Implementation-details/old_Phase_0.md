@@ -1,5 +1,8 @@
 # Phase 0 — IaC & Environment Foundation: Production-Grade Implementation Plan
 
+> [!CAUTION]
+> **Superseded.** This is an earlier draft of the Phase 0 plan, written against Bicep. The authoritative, current plan — migrated to Terraform on 2026-08-11 and validated against the real `.tf` files under `infrastructure/` — lives in [`Phase_0_implementation_plan.md`](./Phase_0_implementation_plan.md). This file is kept only for historical reference; its Bicep code samples no longer reflect the codebase.
+
 > [!IMPORTANT]
 > This is the **exhaustive, production-grade** plan for Phase 0. Every infrastructure decision — naming conventions, SKU selections, networking topology, RBAC strategy, secret management, diagnostic settings, and CI/CD architecture — is specified here. Phase 0 is the foundation that every subsequent phase depends on. No click-ops. No "we'll configure that later." Everything is code.
 

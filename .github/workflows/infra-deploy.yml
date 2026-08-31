@@ -15,7 +15,15 @@ permissions:
   contents: read
 
 env:
-  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  TF_VAR_owner_email: ${{ secrets.OWNER_EMAIL }}
+  TF_VAR_deployer_object_id: ${{ secrets.DEPLOYER_OBJECT_ID }}
+  TF_VAR_sql_admin_password: ${{ secrets.SQL_ADMIN_PASSWORD }}
+  TF_VAR_decision_function_principal_id: ${{ secrets.DECISION_FUNCTION_PRINCIPAL_ID }}
+  TF_VAR_logic_app_principal_id: ${{ secrets.LOGIC_APP_PRINCIPAL_ID }}
 
 jobs:
   determine-environment:
@@ -36,55 +44,93 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     needs: determine-environment
+    defaults:
+      run:
+        working-directory: infrastructure
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login (Client Secret / OIDC)
-        uses: azure/login@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          terraform_version: "~1.9"
 
-      - name: Validate Bicep
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      # backend-<env>.conf is NOT committed (see backend-dev.conf.example) --
+      # the state storage account name isn't secret exactly, but keeping it
+      # out of the repo means changing it never requires a code change. This
+      # step writes it from repo secrets before `terraform init` can use it.
+      - name: Write backend config
         run: |
-          az bicep build --file infrastructure/main.bicep
-          echo "Bicep validation passed"
+          cat > backend-${{ needs.determine-environment.outputs.environment }}.conf <<EOF
+          resource_group_name  = "${{ secrets.TFSTATE_RESOURCE_GROUP }}"
+          storage_account_name = "${{ secrets.TFSTATE_STORAGE_ACCOUNT }}"
+          container_name        = "tfstate"
+          key                   = "fraud-detection-${{ needs.determine-environment.outputs.environment }}.tfstate"
+          EOF
 
-      - name: What-If Deployment
+      - name: Terraform Init
         run: |
-          az deployment sub what-if \
-            --location centralindia \
-            --template-file infrastructure/main.bicep \
-            --parameters infrastructure/modules/parameters/${{ needs.determine-environment.outputs.environment }}.parameters.json
+          terraform init -input=false \
+            -backend-config="backend-${{ needs.determine-environment.outputs.environment }}.conf"
 
-  deploy:
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var-file="environments/${{ needs.determine-environment.outputs.environment }}.tfvars" \
+            -out=tfplan \
+            -input=false
+
+      - name: Upload Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ needs.determine-environment.outputs.environment }}
+          path: infrastructure/tfplan
+          retention-days: 5
+
+  apply:
     runs-on: ubuntu-latest
     needs: [determine-environment, validate]
     if: github.event_name == 'push'
     environment: ${{ needs.determine-environment.outputs.environment }}
+    defaults:
+      run:
+        working-directory: infrastructure
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login (Client Secret / OIDC)
-        uses: azure/login@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          terraform_version: "~1.9"
 
-      - name: Deploy Infrastructure
+      - name: Write backend config
         run: |
-          az deployment sub create \
-            --location centralindia \
-            --template-file infrastructure/main.bicep \
-            --parameters infrastructure/modules/parameters/${{ needs.determine-environment.outputs.environment }}.parameters.json \
-            --name "fraud-infra-$(date +%Y%m%d%H%M%S)"
+          cat > backend-${{ needs.determine-environment.outputs.environment }}.conf <<EOF
+          resource_group_name  = "${{ secrets.TFSTATE_RESOURCE_GROUP }}"
+          storage_account_name = "${{ secrets.TFSTATE_STORAGE_ACCOUNT }}"
+          container_name        = "tfstate"
+          key                   = "fraud-detection-${{ needs.determine-environment.outputs.environment }}.tfstate"
+          EOF
 
-      - name: Verify Deployment
+      - name: Terraform Init
         run: |
-          ENV=${{ needs.determine-environment.outputs.environment }}
-          echo "Verifying resources in rg-fraud-detection-${ENV}..."
-          az resource list \
-            --resource-group "rg-fraud-detection-${ENV}" \
-            --output table
+          terraform init -input=false \
+            -backend-config="backend-${{ needs.determine-environment.outputs.environment }}.conf"
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ needs.determine-environment.outputs.environment }}
+          path: infrastructure
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: Show Outputs
+        run: terraform output

@@ -1,0 +1,11 @@
+# Copy this file to backend-dev.conf (gitignored) and fill in the real values
+# printed by `terraform apply` in infrastructure/bootstrap/ (see that
+# directory's main.tf for the one-time bootstrap step).
+#
+# Usage:
+#   terraform init -backend-config=backend-dev.conf
+
+resource_group_name  = "rg-tfstate-fraud-dev"
+storage_account_name = "sttfstatedevXXXXXX" # exact name printed by the bootstrap apply
+container_name        = "tfstate"
+key                    = "fraud-detection-dev.tfstate"

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "fraud-detection"
 version = "0.1.0"
 description = "Real-time fraud detection platform — shared package namespace for databricks/src and ml code"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 
 # The repo's Databricks notebooks/tests and ml/ pipeline code import a
 # single `fraud_detection` namespace (e.g. `fraud_detection.features.*`,
@@ -41,3 +41,9 @@ packages = [
 
 [tool.setuptools.package-data]
 "*" = ["*.yaml", "*.yml", "*.json"]
+
+[tool.pytest.ini_options]
+# producers/transaction_producer/test_event_mapper.py does a bare
+# `from event_mapper import ...` — it isn't part of the fraud_detection
+# namespace package, so its own directory needs to be on sys.path.
+pythonpath = ["producers/transaction_producer"]

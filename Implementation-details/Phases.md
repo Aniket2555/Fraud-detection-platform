@@ -26,7 +26,7 @@ graph LR
 
 **Duration:** 1–2 weeks
 
-### 0.1 Azure Resource Provisioning (Bicep / Terraform)
+### 0.1 Azure Resource Provisioning (Terraform)
 
 | Resource | Configuration | Purpose |
 |---|---|---|
@@ -43,20 +43,23 @@ graph LR
 
 ```
 infrastructure/
-├── main.bicep                    # Orchestrator template
+├── main.tf                       # Root module — wires all child modules
+├── providers.tf                  # terraform/backend/provider blocks
+├── variables.tf
+├── outputs.tf
 ├── modules/
-│   ├── resource-group.bicep
-│   ├── storage-account.bicep     # ADLS Gen2
-│   ├── databricks-workspace.bicep
-│   ├── azureml-workspace.bicep
-│   ├── key-vault.bicep
-│   ├── vnet.bicep
-│   ├── private-endpoints.bicep
-│   ├── log-analytics.bicep
-│   └── parameters/
-│       ├── dev.parameters.json
-│       ├── staging.parameters.json
-│       └── prod.parameters.json
+│   ├── resource-group/main.tf
+│   ├── storage-account/main.tf   # ADLS Gen2
+│   ├── databricks-workspace/main.tf
+│   ├── azureml-workspace/main.tf
+│   ├── key-vault/main.tf
+│   ├── vnet/main.tf
+│   ├── private-endpoints/main.tf
+│   ├── log-analytics/main.tf
+├── environments/
+│   ├── dev.tfvars
+│   ├── staging.tfvars
+│   └── prod.tfvars
 └── README.md
 ```
 
@@ -65,7 +68,7 @@ infrastructure/
 | Component | Tooling | Configuration |
 |---|---|---|
 | **Source control** | GitHub (or Azure DevOps Repos) | Mono-repo with branch policies: `main` (prod), `staging`, `develop` |
-| **IaC pipeline** | GitHub Actions / Azure DevOps Pipeline | `infra-deploy.yml` — validates Bicep → deploys to target environment on merge |
+| **IaC pipeline** | GitHub Actions / Azure DevOps Pipeline | `infra-deploy.yml` — validates Terraform (`fmt`/`validate`) → plans → deploys to target environment on merge |
 | **Data pipeline CI** | GitHub Actions | `data-ci.yml` — lint PySpark code, run unit tests (local Spark), validate schemas |
 | **ML pipeline CI** | GitHub Actions | `ml-ci.yml` — lint training code, run model unit tests |
 | **Branch protection** | Require PR review + passing CI before merge | Prevents broken code from reaching any environment |
@@ -127,7 +130,7 @@ stfraudlake{env}/
 
 | Deliverable | Verification |
 |---|---|
-| All Azure resources provisioned via Bicep/Terraform | `az resource list --resource-group rg-fraud-detection-dev` shows all resources |
+| All Azure resources provisioned via Terraform | `az resource list --resource-group rg-fraud-detection-dev` shows all resources |
 | CI/CD pipelines running | Push a dummy change → pipeline triggers, validates, deploys |
 | Databricks Unity Catalog configured | `SHOW SCHEMAS IN fraud_detection_dev` returns `bronze`, `silver`, `gold`, `quarantine`, `reference` |
 | ADLS Gen2 containers/directories exist | `az storage fs list --account-name stfraudlakedev` |
@@ -397,9 +400,7 @@ with mlflow.start_run(run_name="xgboost-baseline-v1"):
 
 ```
 infrastructure/modules/
-├── eventhubs.bicep
-├── eventhubs-schema-registry.bicep
-└── eventhubs-capture.bicep
+└── eventhubs/main.tf             # Namespace, Event Hub, consumer group, auth rules
 ```
 
 ### 2.2 Canonical Event Schema (Avro)
@@ -757,8 +758,8 @@ graph/
 └── README.md
 
 infrastructure/modules/
-├── cosmos-db.bicep
-└── managed-redis.bicep
+├── cosmos-db/main.tf
+└── managed-redis/main.tf
 ```
 
 ### 3.5 Graph Feature Batch Computation (GraphFrames)
@@ -1123,8 +1124,8 @@ decision-engine/
 
 ```
 infrastructure/modules/
-├── service-bus.bicep
-└── app-configuration.bicep
+├── service-bus/main.tf
+└── app-configuration/main.tf
 ```
 
 #### Files to Create
@@ -1165,7 +1166,7 @@ database/
 └── README.md
 
 infrastructure/modules/
-├── azure-sql.bicep
+├── azure-sql/main.tf
 ```
 
 ### 5.4 Azure Logic App — Step-Up / Manual Review Workflow
@@ -1198,11 +1199,11 @@ graph TD
 ```
 workflows/
 ├── logic-app/
-│   ├── step-up-review-workflow.json  # Logic App definition (ARM/Bicep)
+│   ├── step-up-review-workflow.json  # Logic App definition (Terraform-deployed)
 │   └── README.md
 
 infrastructure/modules/
-├── logic-app.bicep
+├── logic-app/main.tf
 ```
 
 ### 5.5 Compliance Audit Logging
@@ -1387,7 +1388,7 @@ ml/
 
 ```
 infrastructure/modules/
-├── purview.bicep
+├── purview/main.tf
 
 governance/
 ├── purview-setup/
@@ -1462,7 +1463,7 @@ dashboards/
 
 ```
 infrastructure/modules/
-├── alerts.bicep                   # All Azure Monitor alert rules
+├── alerts/main.tf                 # All Azure Monitor alert rules
 
 monitoring/
 ├── alert-config/
@@ -1550,26 +1551,35 @@ docs/
 ```
 fraud-detection-platform/
 ├── infrastructure/
-│   ├── main.bicep
+│   ├── main.tf
+│   ├── providers.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── environments/
+│   │   ├── dev.tfvars
+│   │   ├── staging.tfvars
+│   │   └── prod.tfvars
+│   ├── bootstrap/                # One-time remote state backend provisioning
 │   └── modules/
-│       ├── resource-group.bicep
-│       ├── storage-account.bicep
-│       ├── databricks-workspace.bicep
-│       ├── azureml-workspace.bicep
-│       ├── key-vault.bicep
-│       ├── vnet.bicep
-│       ├── private-endpoints.bicep
-│       ├── log-analytics.bicep
-│       ├── eventhubs.bicep
-│       ├── service-bus.bicep
-│       ├── azure-sql.bicep
-│       ├── cosmos-db.bicep
-│       ├── managed-redis.bicep
-│       ├── logic-app.bicep
-│       ├── app-configuration.bicep
-│       ├── purview.bicep
-│       ├── alerts.bicep
-│       └── parameters/
+│       ├── resource-group/main.tf
+│       ├── storage-account/main.tf
+│       ├── databricks-workspace/main.tf
+│       ├── azureml-workspace/main.tf
+│       ├── key-vault/main.tf
+│       ├── vnet/main.tf
+│       ├── private-endpoints/main.tf
+│       ├── log-analytics/main.tf
+│       ├── eventhubs/main.tf
+│       ├── service-bus/main.tf
+│       ├── azure-sql/main.tf
+│       ├── cosmos-db/main.tf
+│       ├── managed-redis/main.tf
+│       ├── logic-app/main.tf
+│       ├── app-configuration/main.tf
+│       ├── purview/main.tf
+│       ├── alerts/main.tf
+│       ├── rbac-assignments/main.tf
+│       └── diagnostic-settings/main.tf
 ├── .github/workflows/
 │   ├── infra-deploy.yml
 │   ├── data-ci.yml
@@ -1670,7 +1680,7 @@ fraud-detection-platform/
 > [!IMPORTANT]
 > The following decisions impact the implementation and should be resolved before starting:
 
-1. **IaC tool choice** — Bicep or Terraform? Bicep is Azure-native and simpler; Terraform is multi-cloud and has a larger ecosystem. This affects all of Phase 0.
+1. ~~**IaC tool choice** — Bicep or Terraform?~~ **Resolved: Terraform** (migrated 2026-08-11). Terraform's multi-cloud ecosystem and module reusability outweighed Bicep's simpler Azure-native syntax for this project. Affects all of Phase 0.
 2. **CI/CD platform** — GitHub Actions or Azure DevOps Pipelines? Affects `.github/workflows/` vs. `azure-pipelines/` directory structure.
 3. **Databricks vs. ADF as primary orchestrator** — for batch jobs (Gold aggregations, feature backfills, reference data sync). Recommendation: Databricks Workflows if Databricks is already the compute backbone.
 4. **Serving runtime** — Azure ML Managed Online Endpoints (simpler ops) vs. AKS + FastAPI/Triton (more flexibility for multi-model orchestration). Recommendation: start with Managed Online Endpoints.

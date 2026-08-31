@@ -122,15 +122,25 @@ az account show --query tenantId -o tsv
 az ad signed-in-user show --query id -o tsv
 ```
 
-### 2.2 Deploy All Azure Resources via Bicep
+### 2.2 Deploy All Azure Resources via Terraform
+
+One-time bootstrap of the remote state storage account (skip if already done):
 
 ```powershell
-az deployment sub create `
-  --name "fraud-detection-$(Get-Date -Format 'yyyyMMddHHmm')" `
-  --location centralindia `
-  --template-file infrastructure/main.bicep `
-  --parameters infrastructure/modules/parameters/dev.parameters.json `
-  --verbose
+cd infrastructure/bootstrap
+terraform init
+terraform apply -var="environment=dev"
+# copy the printed backend_config_snippet into ../backend-dev.conf
+```
+
+Then deploy everything:
+
+```powershell
+cd infrastructure
+terraform init -backend-config=backend-dev.conf
+$env:TF_VAR_sql_admin_password = "YOUR-STRONG-PASSWORD"
+terraform plan  -var-file=environments/dev.tfvars
+terraform apply -var-file=environments/dev.tfvars
 ```
 
 **Expected time:** ~12–18 minutes.
@@ -164,7 +174,7 @@ az keyvault secret set --vault-name $KV --name "eventhub-conn-str" `
 az keyvault secret set --vault-name $KV --name "servicebus-conn-str" `
   --value "Endpoint=sb://sbns-fraud-dev.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=..."
 
-# Azure SQL admin password (same as set during Bicep deploy)
+# Azure SQL admin password (same as set via TF_VAR_sql_admin_password during Terraform deploy)
 az keyvault secret set --vault-name $KV --name "sql-admin-password-dev" --value "YOUR-STRONG-PASSWORD"
 
 # PII hashing salt (generate 32 random chars)
@@ -659,27 +669,29 @@ az ad group create --display-name "compliance-officers"  --mail-nickname "compli
 az ad group create --display-name "platform-admins"      --mail-nickname "platform-admins"
 ```
 
-### 10.3 Deploy RBAC Bicep Module
+### 10.3 Apply RBAC Assignments
+
+The Databricks → Storage/Key Vault role assignments are already applied automatically as
+part of the `terraform apply` in §2.2 (the RBAC module is wired into the root config, unlike
+the old Bicep version where it had to be deployed as a separate manual step). The Decision
+Function and Logic App identities aren't provisioned by this Terraform config, though, so
+their role assignments need their principal IDs supplied once those resources exist elsewhere:
 
 ```powershell
-# Get the Managed Identity Object IDs of your Function App and Databricks workspace
+# Get the Managed Identity Object IDs of your Function App and Logic App
 $FUNC_MI = az functionapp identity show `
   --name func-decision-engine-dev --resource-group rg-fraud-detection-dev `
   --query principalId -o tsv
 
-$DBW_MI = az databricks workspace show `
-  --name dbw-fraud-dev --resource-group rg-fraud-detection-dev `
-  --query identity.principalId -o tsv
+$LOGICAPP_MI = az logic-app identity show `
+  --name logic-stepup-workflow-dev --resource-group rg-fraud-detection-dev `
+  --query principalId -o tsv
 
-az deployment group create `
-  --resource-group rg-fraud-detection-dev `
-  --template-file infrastructure/modules/rbac-assignments.bicep `
-  --parameters `
-    environment=dev `
-    storageAccountName=stfraudlakedev `
-    keyVaultName=kv-fraud-dev `
-    databricksPrincipalId=$DBW_MI `
-    decisionFunctionPrincipalId=$FUNC_MI
+cd infrastructure
+terraform apply -var-file=environments/dev.tfvars `
+  -var="decision_function_principal_id=$FUNC_MI" `
+  -var="logic_app_principal_id=$LOGICAPP_MI" `
+  -target=module.rbac_assignments
 ```
 
 ### 10.4 Enable CI/CD Security Scanning
@@ -693,7 +705,7 @@ git push -u origin main
 
 Every pull request now auto-runs `.github/workflows/security-scan.yml`:
 - **TruffleHog** — Verified secret leak detection
-- **Checkov** — Bicep IaC misconfiguration scanning
+- **Checkov** — Terraform IaC misconfiguration scanning
 - **Bandit** — Python SAST (hardcoded credentials, insecure patterns)
 - **pip-audit** — Dependency CVE scanning
 
@@ -759,7 +771,7 @@ az servicebus topic show `
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| `az deployment sub create` fails with "QuotaExceeded" | Free Trial vCPU limits | Use `Standard_DS2_v2` (2 vCPU) instead of DS3_v2 in Bicep params |
+| `terraform apply` fails with "QuotaExceeded" | Free Trial vCPU limits | Use `Standard_DS2_v2` (2 vCPU) instead of DS3_v2 wherever a VM size is set |
 | Databricks cluster fails to start | vCPU quota exhausted | Use Single Node cluster: `num_workers: 0`, `cluster.profile: singleNode` |
 | `pii_masking.py` raises `RuntimeError` on secret fetch | Key Vault unreachable | Set `FRAUD_ENV=dev` in Databricks cluster environment variables |
 | Decision Engine returns `approve_fallback` | Required fields missing from request body | Ensure payload includes: `transaction_id`, `customer_id`, `card_id`, `amount`, `fraud_probability` |

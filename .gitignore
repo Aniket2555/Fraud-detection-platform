@@ -43,11 +43,27 @@ ENV/
 *.pfx
 secrets.json
 
-# Bicep / Azure / Terraform
+# Terraform
 *.tfstate
 *.tfstate.*
 .terraform/
-main.bicep.binary
+crash.log
+crash.*.log
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# Real backend config (contains the actual state-storage account name) --
+# keep only backend-*.conf.example checked in, see infrastructure/backend-dev.conf.example
+backend-*.conf
+!backend-*.conf.example
+# Locally-generated secrets -- never commit
+.sql_admin_password.local
+kaggle.json
+.kaggle/
+# .terraform.lock.hcl is intentionally NOT ignored -- it pins provider
+# versions like a lockfile and should be committed.
 
 # Databricks & PySpark
 .databricks/

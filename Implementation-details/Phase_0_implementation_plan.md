@@ -16,7 +16,10 @@
 >
 > **Upgrade path:** When you move to Pay-As-You-Go or MSDN subscription, the Production Decision Registry (§end) documents exactly what to change: enable VNet injection, add private endpoints, upgrade to Premium Databricks, add Azure ML workspace.
 
-**Phase 0 Goal:** Provision core Azure infrastructure via Bicep, set up Databricks workspace, establish CI/CD pipelines, and create the ADLS Gen2 directory structure — producing an environment where Phase 1 can begin immediately with zero manual setup.
+**Phase 0 Goal:** Provision core Azure infrastructure via Terraform, set up Databricks workspace, establish CI/CD pipelines, and create the ADLS Gen2 directory structure — producing an environment where Phase 1 can begin immediately with zero manual setup.
+
+> [!NOTE]
+> **Migrated from Bicep to Terraform** (2026-08-11). Every code sample in this section now reflects the real, `terraform validate`-checked `.tf` files under `infrastructure/`, not Bicep. The migration also closed a real gap the Bicep version had: `main.bicep` only ever wired together 5 of 13 modules (Resource Group, Log Analytics, Key Vault, Storage, Databricks) — Event Hubs, Cosmos DB, Service Bus, Azure SQL, App Configuration, RBAC, and Private Endpoints all had to be deployed by hand via separate `az deployment group create` calls. Terraform's root `main.tf` wires all 13 into one graph, so `terraform apply` genuinely deploys everything in one command for the first time.
 
 **Duration:** 1–2 weeks
 
@@ -24,31 +27,7 @@
 
 ## Phase 0 Internal Dependency Graph
 
-```mermaid
-graph TD
-    A["0.1 Subscription &\nResource Group"] --> C["0.2 Key Vault"]
-    A --> D["0.3 ADLS Gen2\n(Service Firewall)"]
-    A --> E["0.4 Databricks Workspace\n(Managed VNet)"]
-    C --> D
-    C --> E
-    D --> G["0.4b Databricks\nSchema Setup"]
-    E --> G
-    D --> H["0.5 Monitor &\nLog Analytics"]
-    A --> I["0.6 CI/CD Pipelines\n(GitHub Actions)"]
-    G --> J["0.7 Azure Data Factory"]
-    D --> J
-    H --> K["0.8 Validation &\nSmoke Tests"]
-    I --> K
-    J --> K
-
-    style E fill:#ffe0b2,stroke:#ff9800
-    style D fill:#e8f5e9,stroke:#4caf50
-```
-
-> [!NOTE]
-> **Compared to the production plan:** Networking (VNet/subnets/private endpoints/DNS zones) is removed entirely for Free Trial. Azure ML Workspace is deferred to Phase 3. Databricks uses managed VNet (default) instead of VNet injection. This saves ~$50–80/month.
-
----
+![alt text](image.png)
 
 ## 0.1 Azure Subscription & Resource Group Strategy
 
@@ -81,7 +60,7 @@ graph TD
 | `project` | `fraud-detection` | Cost allocation |
 | `environment` | `dev` | Environment identification |
 | `owner` | `{your-email}` | Accountability |
-| `managed-by` | `bicep` | Distinguish IaC-managed from click-ops resources |
+| `managed-by` | `terraform` | Distinguish IaC-managed from click-ops resources |
 
 ### 0.1.3 Budget Alerts
 
@@ -120,42 +99,25 @@ These services are free or have free tiers that help stretch the $200 credit:
 | **Databricks** | 14-day Premium trial included | Unity Catalog, cluster policies (first 2 weeks only) |
 | **GitHub Actions** | 2,000 minutes/month free (public repos) | CI/CD |
 
-### 0.1.5 Bicep Template: Resource Group
+### 0.1.5 Terraform Module: Resource Group
 
-#### `infrastructure/modules/resource-group.bicep`
+#### `infrastructure/modules/resource-group/main.tf`
 
-```bicep
-targetScope = 'subscription'
+```hcl
+resource "azurerm_resource_group" "this" {
+  name     = "rg-${var.project_name}-${var.environment}"
+  location = var.location
 
-@description('The environment name — dev only for Free Trial')
-@allowed(['dev'])
-param environment string = 'dev'
-
-@description('The Azure region for the resource group')
-param location string = 'centralindia'
-
-@description('Project name for naming convention')
-param projectName string = 'fraud-detection'
-
-@description('Owner email for tagging')
-param ownerEmail string
-
-var rgName = 'rg-${projectName}-${environment}'
-
-resource rg 'Microsoft.Resources/resourceGroups@2023-07-01' = {
-  name: rgName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    owner: ownerEmail
-    'managed-by': 'bicep'
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    owner        = var.owner_email
+    "managed-by" = "terraform"
   }
 }
-
-output resourceGroupName string = rg.name
-output resourceGroupId string = rg.id
 ```
+
+`variables.tf` declares `environment` (validated to `"dev"` only, matching Bicep's `@allowed(['dev'])`), `location` (default `centralindia`), `project_name`, and `owner_email`. `outputs.tf` exposes `resource_group_name`, `resource_group_id`, and `location` for downstream modules.
 
 ---
 
@@ -172,7 +134,7 @@ output resourceGroupId string = rg.id
 
 | Component | Free Trial Choice | Production Upgrade |
 |---|---|---|
-| **VNet** | ❌ Not created | Add `vnet.bicep` with 6 subnets |
+| **VNet** | ❌ Not created | Add a `vnet` Terraform module with 6 subnets |
 | **Databricks networking** | Default managed VNet (Databricks handles it) | VNet injection into custom subnets |
 | **ADLS access** | Public endpoint + service firewall (allow Azure services) | Private endpoint + private DNS zone |
 | **Key Vault access** | Public endpoint + service firewall | Private endpoint |
@@ -184,7 +146,7 @@ output resourceGroupId string = rg.id
 
 ### 0.2.2 Service Firewall Configuration (Instead of Private Endpoints)
 
-Applied via Bicep `networkAcls` on each resource:
+Applied via Terraform `network_acls`/`network_rules` blocks on each resource:
 
 | Resource | Firewall Setting | Effect |
 |---|---|---|
@@ -241,121 +203,75 @@ Applied via Bicep `networkAcls` on each resource:
 | Developer (your Entra ID) | `Key Vault Administrator` | Key Vault (dev only) | Full access for debugging |
 | Azure Functions (managed identity) | `Key Vault Secrets User` | Key Vault | Read secrets at runtime (Phase 5) |
 
-### 0.3.4 Bicep Template: Key Vault
+### 0.3.4 Terraform Module: Key Vault
 
-#### `infrastructure/modules/key-vault.bicep`
+#### `infrastructure/modules/key-vault/main.tf`
 
-```bicep
-@description('Environment name')
-param environment string
+```hcl
+resource "azurerm_key_vault" "this" {
+  name                = "kv-fraud-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  tenant_id           = var.tenant_id
 
-@description('Location')
-param location string
+  sku_name = "standard" # Free Trial: always Standard (10k free ops/month)
 
-param projectName string = 'fraud-detection'
+  rbac_authorization_enabled    = true  # Use RBAC, not access policies
+  soft_delete_retention_days    = 90
+  purge_protection_enabled      = false # Free Trial: disabled for easy cleanup
+  public_network_access_enabled = true  # Free Trial: no private endpoint
 
-@description('Tenant ID for Azure AD')
-param tenantId string
-
-@description('Object ID of the deployer for initial access')
-param deployerObjectId string
-
-@description('Whether to enable purge protection')
-param enablePurgeProtection bool = environment == 'prod'
-
-var kvName = 'kv-fraud-${environment}'
-
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
-  name: kvName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
+  network_acls {
+    default_action = "Allow" # Free Trial: allow all (no VNet)
+    bypass          = "AzureServices"
   }
-  properties: {
-    tenantId: tenantId
-    sku: {
-      family: 'A'
-      name: 'standard'    // Free Trial: always Standard (10k free ops/month)
-    }
-    enableRbacAuthorization: true     // Use RBAC, not access policies
-    enableSoftDelete: true
-    softDeleteRetentionInDays: 90
-    enablePurgeProtection: false     // Free Trial: disabled for easy cleanup
-    enabledForDeployment: false
-    enabledForDiskEncryption: false
-    enabledForTemplateDeployment: true
-    publicNetworkAccess: 'Enabled'   // Free Trial: no private endpoint
-    networkAcls: {
-      defaultAction: 'Allow'         // Free Trial: allow all (no VNet)
-      bypass: 'AzureServices'
-    }
+
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
 
-// --- Deployer gets admin role ---
-resource deployerAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: keyVault
-  name: guid(keyVault.id, deployerObjectId, 'Key Vault Administrator')
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions', 
-      '00482a5a-887f-4fb3-b363-3b7fe8e74483'  // Key Vault Administrator
-    )
-    principalId: deployerObjectId
-    principalType: 'User'
-  }
+# --- Deployer gets admin role ---
+# Unlike Bicep, no manually-computed guid() is needed for the role assignment's
+# name -- azurerm_role_assignment auto-generates one, and Terraform's own state
+# (not the resource name) is what makes re-applying idempotent.
+resource "azurerm_role_assignment" "deployer_kv_admin" {
+  scope                = azurerm_key_vault.this.id
+  role_definition_name = "Key Vault Administrator"
+  principal_id          = var.deployer_object_id
 }
 
-// --- Placeholder secrets for later phases ---
-resource placeholderSecrets 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [for secretName in [
-  'eventhub-conn-str'
-  'eventhub-namespace'
-  'redis-conn-str'
-  'azure-sql-conn-str'
-  'cosmos-db-conn-str'
-  'service-bus-conn-str'
-  'app-config-conn-str'
-]: {
-  parent: keyVault
-  name: secretName
-  properties: {
-    value: 'PLACEHOLDER-TO-BE-SET-IN-PHASE-${secretName}'
-    contentType: 'text/plain'
-    attributes: {
-      enabled: true
-    }
-  }
-}]
+# --- Placeholder secrets for later phases ---
+resource "azurerm_key_vault_secret" "placeholders" {
+  for_each = toset(var.placeholder_secret_names) # eventhub-conn-str, eventhub-namespace, redis-conn-str, azure-sql-conn-str, cosmos-db-conn-str, service-bus-conn-str, app-config-conn-str
 
-// --- Diagnostic settings ---
-resource kvDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
-  name: '${kvName}-diagnostics'
-  scope: keyVault
-  properties: {
-    workspaceId: logAnalyticsWorkspaceId   // Passed as parameter
-    logs: [
-      {
-        category: 'AuditEvent'
-        enabled: true
-        retentionPolicy: { enabled: true, days: 365 }
-      }
-    ]
-    metrics: [
-      {
-        category: 'AllMetrics'
-        enabled: true
-        retentionPolicy: { enabled: true, days: 90 }
-      }
-    ]
-  }
+  name         = each.value
+  value        = "PLACEHOLDER-TO-BE-SET-IN-PHASE-${each.value}"
+  key_vault_id = azurerm_key_vault.this.id
+  content_type = "text/plain"
+
+  depends_on = [azurerm_role_assignment.deployer_kv_admin]
 }
 
-output keyVaultId string = keyVault.id
-output keyVaultName string = keyVault.name
-output keyVaultUri string = keyVault.properties.vaultUri
+# --- Diagnostic settings ---
+resource "azurerm_monitor_diagnostic_setting" "this" {
+  name                       = "kv-fraud-${var.environment}-diagnostics"
+  target_resource_id        = azurerm_key_vault.this.id
+  log_analytics_workspace_id = var.log_analytics_workspace_id
+
+  enabled_log {
+    category = "AuditEvent"
+  }
+
+  enabled_metric {
+    category = "AllMetrics"
+  }
+}
 ```
+
+`outputs.tf` exposes `key_vault_id`, `key_vault_name`, and `key_vault_uri`. One deliberate simplification from the Bicep version: retention is set once, at the Log Analytics workspace level (30 days — see §0.7.1), rather than duplicated per-diagnostic-setting — the azurerm provider's modern `azurerm_monitor_diagnostic_setting` schema no longer exposes a separate `retention_policy` on `enabled_log`/`enabled_metric` blocks (Azure itself deprecated per-setting retention in favor of the workspace's own retention).
 
 ---
 
@@ -472,97 +388,63 @@ checkpoints/
 | CI/CD service principal | `Storage Blob Data Contributor` | Storage account | Deploy, manage directory structure |
 | Developer (Entra ID) | `Storage Blob Data Contributor` | Storage account (dev only) | Debugging, manual inspection |
 
-### 0.4.6 Bicep Template: ADLS Gen2
+### 0.4.6 Terraform Module: ADLS Gen2
 
-#### `infrastructure/modules/storage-account.bicep`
+#### `infrastructure/modules/storage-account/main.tf`
 
-```bicep
-@description('Environment name')
-param environment string
+```hcl
+resource "azurerm_storage_account" "this" {
+  name                = "stfraudlake${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
 
-@description('Location')
-param location string
+  account_tier              = "Standard"
+  account_replication_type  = "LRS" # Free Trial: cheapest redundancy
+  account_kind               = "StorageV2"
 
-param projectName string = 'fraud-detection'
+  is_hns_enabled = true # Hierarchical namespace = ADLS Gen2
 
-@description('Subnet ID for private endpoint')
-param privateEndpointSubnetId string
+  min_tls_version                  = "TLS1_2"
+  https_traffic_only_enabled       = true
+  allow_nested_items_to_be_public  = false
+  shared_access_key_enabled        = true # Free Trial: needed for some Databricks operations
+  default_to_oauth_authentication  = true
+  access_tier                      = "Hot"
 
-var storageName = 'stfraudlake${environment}'
-
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: storageName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
+  network_rules {
+    default_action = "Allow" # Free Trial: no VNet/private endpoints
+    bypass          = ["AzureServices"]
   }
-  kind: 'StorageV2'
-  sku: {
-    name: 'Standard_LRS'                 // Free Trial: cheapest redundancy
-  }
-  properties: {
-    isHnsEnabled: true                   // Hierarchical namespace = ADLS Gen2
-    minimumTlsVersion: 'TLS1_2'
-    supportsHttpsTrafficOnly: true
-    allowBlobPublicAccess: false
-    allowSharedKeyAccess: true           // Free Trial: needed for Databricks access
-    defaultToOAuthAuthentication: true
-    accessTier: 'Hot'
-    networkAcls: {
-      defaultAction: 'Allow'             // Free Trial: no VNet/private endpoints
-      bypass: 'AzureServices'
+
+  blob_properties {
+    delete_retention_policy {
+      days = 7 # Free Trial: shortest retention to save storage
     }
+    container_delete_retention_policy {
+      days = 7
+    }
+    # No blob versioning -- Delta Lake handles versioning via its transaction log
+  }
+
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
 
-// --- Blob services configuration ---
-resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
-  parent: storageAccount
-  name: 'default'
-  properties: {
-    deleteRetentionPolicy: {
-      enabled: true
-      days: 7                            // Free Trial: shortest retention to save storage
-    }
-    containerDeleteRetentionPolicy: {
-      enabled: true
-      days: 7
-    }
-    // No blob versioning — Delta Lake handles versioning via transaction log
-  }
+# --- Filesystem containers (ADLS Gen2) ---
+# staging: human/Kaggle-API upload landing zone (pl_ingest_ieee_cis copies staging -> raw/ieee-cis/)
+# -- added post-launch, see this phase's "Known Issues" below.
+resource "azurerm_storage_data_lake_gen2_filesystem" "containers" {
+  for_each = toset(var.containers) # staging, raw, bronze, silver, gold, quarantine, checkpoints, feature-store, eventhubs-capture
+
+  name               = each.value
+  storage_account_id = azurerm_storage_account.this.id
 }
-
-// --- Filesystem containers (ADLS Gen2) ---
-var containers = [
-  'raw'
-  'bronze'
-  'silver'
-  'gold'
-  'quarantine'
-  'checkpoints'
-  'feature-store'
-  'eventhubs-capture'
-]
-
-resource filesystems 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = [for container in containers: {
-  parent: blobServices
-  name: container
-  properties: {
-    publicAccess: 'None'
-  }
-}]
-
-// --- FREE TRIAL: No private endpoints ---
-// Private endpoints cost ~$7.20/month each. Skipped for Free Trial.
-// Production upgrade: Add pe-${storageName}-dfs and pe-${storageName}-blob
-// pointing to snet-private-endpoints subnet.
-
-output storageAccountId string = storageAccount.id
-output storageAccountName string = storageAccount.name
-output dfsEndpoint string = storageAccount.properties.primaryEndpoints.dfs
 ```
+
+Private endpoints are handled by the separate `private-endpoints` module (§0.2, off by default for Free Trial — `enable_private_endpoints = false`), not inline here. `outputs.tf` exposes `storage_account_id`, `storage_account_name`, and `dfs_endpoint`.
 
 ---
 
@@ -582,50 +464,32 @@ output dfsEndpoint string = storageAccount.properties.primaryEndpoints.dfs
 | **Public network access** | **Enabled** | Disabled + Private Link for prod |
 | **Encryption** | Azure-managed keys | CMK via Key Vault for prod |
 
-### 0.5.2 Bicep Template: Databricks Workspace
+### 0.5.2 Terraform Module: Databricks Workspace
 
-#### `infrastructure/modules/databricks-workspace.bicep`
+#### `infrastructure/modules/databricks-workspace/main.tf`
 
-```bicep
-@description('Environment name')
-param environment string = 'dev'
+```hcl
+# Free Trial: Premium SKU is required for Unity Catalog + cluster policies, and
+# is included as a 14-day trial with the Azure Free Trial. No VNet injection --
+# managed (default) VNet only.
+resource "azurerm_databricks_workspace" "this" {
+  name                = "dbw-fraud-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = "premium"
 
-@description('Location')
-param location string
+  managed_resource_group_name   = "rg-dbw-fraud-${var.environment}-managed"
+  public_network_access_enabled = true # Free Trial: always public
 
-param projectName string = 'fraud-detection'
-
-// FREE TRIAL: No VNet parameters needed — using default managed VNet
-
-var workspaceName = 'dbw-fraud-${environment}'
-var managedRgName = 'rg-dbw-fraud-${environment}-managed'
-
-resource databricksWorkspace 'Microsoft.Databricks/workspaces@2024-05-01' = {
-  name: workspaceName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
-  }
-  sku: {
-    name: 'premium'     // 14-day Premium trial included with Free Trial
-  }
-  properties: {
-    managedResourceGroupId: subscriptionResourceId(
-      'Microsoft.Resources/resourceGroups', managedRgName
-    )
-    publicNetworkAccess: 'Enabled'   // Free Trial: always public
-    // FREE TRIAL: No VNet injection parameters
-    // Production upgrade: add customVirtualNetworkId, customPublicSubnetName,
-    // customPrivateSubnetName, enableNoPublicIp
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
-
-output workspaceId string = databricksWorkspace.id
-output workspaceUrl string = databricksWorkspace.properties.workspaceUrl
-output workspaceName string = databricksWorkspace.name
 ```
+
+`outputs.tf` exposes `workspace_id`, `workspace_url`, `workspace_name`, and — used by the `rbac-assignments` module — `storage_account_identity_principal_id` (the workspace's own managed identity, read straight from `azurerm_databricks_workspace.this.storage_account_identity[0].principal_id`). That last one is a real improvement over the Bicep version: Bicep's `rbac-assignments.bicep` required this principal ID to be looked up by hand after the fact (`az databricks workspace show --query storageAccountIdentity.principalId`) and passed in as an external parameter; Terraform wires it automatically since both resources live in the same state.
 
 ### 0.5.3 Unity Catalog Setup (Premium Trial Period Only)
 
@@ -885,7 +749,7 @@ echo "Secret scope 'kv-fraud' created and linked to Key Vault '${KV_NAME}'"
 > - When you need **Managed Online Endpoints** for real-time serving (Phase 4)
 > - When you upgrade to Pay-As-You-Go subscription
 >
-> The `azureml-workspace.bicep` template from the production plan is preserved in the `infrastructure/modules/` directory — ready to deploy when needed.
+> No `azureml-workspace` Terraform module exists yet (nor did an equivalent Bicep template) — this is still a real gap to fill when Azure ML is actually needed in Phase 3+, not a preserved-but-dormant file the way this section originally implied.
 
 ### 0.6.1 MLflow on Databricks (Phase 0–2 Alternative)
 
@@ -913,14 +777,19 @@ echo "Secret scope 'kv-fraud' created and linked to Key Vault '${KV_NAME}'"
 
 ### 0.7.2 Diagnostic Settings (Connected Resources)
 
-Every resource provisioned in Phase 0 sends diagnostics to Log Analytics:
+Every major resource provisioned across Phases 0–5 sends diagnostics to Log Analytics.
+This is genuinely true for the first time as of the Terraform migration — the Bicep version
+only ever wired this up for Key Vault; the Terraform root module applies the generic
+`diagnostic-settings` module via `for_each` over Storage, Databricks, Event Hubs, Cosmos DB,
+Service Bus, Azure SQL, and App Configuration, using a blanket `categoryGroup = "allLogs"` +
+`AllMetrics` rather than hand-picking named categories per resource type (simpler, and
+doesn't require knowing every resource type's exact category names up front):
 
 | Resource | Logs | Metrics |
 |---|---|---|
 | Key Vault | AuditEvent | AllMetrics |
-| ADLS Gen2 | StorageRead, StorageWrite, StorageDelete | Transaction |
-| Databricks (via workspace) | Clusters, Jobs, Notebook, SQLPermissions | N/A (via Databricks job metrics) |
-| Azure ML | AmlComputeClusterEvent, AmlRunStatusChanged | AllMetrics |
+| ADLS Gen2, Databricks, Event Hubs, Cosmos DB, Service Bus, Azure SQL, App Configuration | `allLogs` (category group) | AllMetrics |
+| Azure ML | Not yet provisioned (see §0.6) | — |
 
 ### 0.7.3 Baseline Alerts (Phase 0)
 
@@ -933,46 +802,29 @@ Every resource provisioned in Phase 0 sends diagnostics to Log Analytics:
 | Databricks job failure | Job status == FAILED | Sev 2 | Email notification |
 | Azure ML compute utilization | CPU > 90% sustained for 15 min | Sev 3 | Email notification |
 
-### 0.7.4 Bicep Template: Log Analytics
+### 0.7.4 Terraform Module: Log Analytics
 
-#### `infrastructure/modules/log-analytics.bicep`
+#### `infrastructure/modules/log-analytics/main.tf`
 
-```bicep
-@description('Environment name')
-param environment string
+```hcl
+# Free Trial: 30-day retention (free tier) + 1 GB/day cap (stays within the 5 GB/month free tier)
+resource "azurerm_log_analytics_workspace" "this" {
+  name                = "log-fraud-${var.environment}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = "PerGB2018"
+  retention_in_days   = var.retention_days
+  daily_quota_gb      = var.daily_cap_gb > 0 ? var.daily_cap_gb : null
 
-@description('Location')
-param location string
-
-param projectName string = 'fraud-detection'
-
-var logAnalyticsName = 'log-fraud-${environment}'
-
-var retentionDays = 30                    // Free Trial: 30 days (free tier)
-var dailyCapGb = 1                        // Free Trial: 1 GB/day (stay within free 5 GB/month)
-
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
-  name: logAnalyticsName
-  location: location
-  tags: {
-    project: projectName
-    environment: environment
-    'managed-by': 'bicep'
-  }
-  properties: {
-    sku: {
-      name: 'PerGB2018'
-    }
-    retentionInDays: retentionDays
-    workspaceCapping: dailyCapGb > 0 ? {
-      dailyQuotaGb: dailyCapGb
-    } : null
+  tags = {
+    project      = var.project_name
+    environment  = var.environment
+    "managed-by" = "terraform"
   }
 }
-
-output logAnalyticsId string = logAnalytics.id
-output logAnalyticsName string = logAnalytics.name
 ```
+
+`outputs.tf` exposes `log_analytics_id`, `log_analytics_name`, and `workspace_id` (the workspace's own GUID, distinct from its ARM resource ID).
 
 ---
 
@@ -1009,7 +861,15 @@ permissions:
   contents: read
 
 env:
-  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  TF_VAR_owner_email: ${{ secrets.OWNER_EMAIL }}
+  TF_VAR_deployer_object_id: ${{ secrets.DEPLOYER_OBJECT_ID }}
+  TF_VAR_sql_admin_password: ${{ secrets.SQL_ADMIN_PASSWORD }}
+  TF_VAR_decision_function_principal_id: ${{ secrets.DECISION_FUNCTION_PRINCIPAL_ID }}
+  TF_VAR_logic_app_principal_id: ${{ secrets.LOGIC_APP_PRINCIPAL_ID }}
 
 jobs:
   determine-environment:
@@ -1030,59 +890,97 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     needs: determine-environment
+    defaults:
+      run:
+        working-directory: infrastructure
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          terraform_version: "~1.9"
 
-      - name: Validate Bicep
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      # backend-<env>.conf is NOT committed (see backend-dev.conf.example) --
+      # this step writes it from repo secrets before `terraform init` can use it.
+      - name: Write backend config
         run: |
-          az bicep build --file infrastructure/main.bicep
-          echo "Bicep validation passed"
+          cat > backend-${{ needs.determine-environment.outputs.environment }}.conf <<EOF
+          resource_group_name  = "${{ secrets.TFSTATE_RESOURCE_GROUP }}"
+          storage_account_name = "${{ secrets.TFSTATE_STORAGE_ACCOUNT }}"
+          container_name        = "tfstate"
+          key                   = "fraud-detection-${{ needs.determine-environment.outputs.environment }}.tfstate"
+          EOF
 
-      - name: What-If Deployment
+      - name: Terraform Init
         run: |
-          az deployment sub what-if \
-            --location centralindia \
-            --template-file infrastructure/main.bicep \
-            --parameters infrastructure/modules/parameters/${{ needs.determine-environment.outputs.environment }}.parameters.json
+          terraform init -input=false \
+            -backend-config="backend-${{ needs.determine-environment.outputs.environment }}.conf"
 
-  deploy:
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var-file="environments/${{ needs.determine-environment.outputs.environment }}.tfvars" \
+            -out=tfplan \
+            -input=false
+
+      - name: Upload Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ needs.determine-environment.outputs.environment }}
+          path: infrastructure/tfplan
+          retention-days: 5
+
+  apply:
     runs-on: ubuntu-latest
     needs: [determine-environment, validate]
     if: github.event_name == 'push'
     environment: ${{ needs.determine-environment.outputs.environment }}
+    defaults:
+      run:
+        working-directory: infrastructure
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          terraform_version: "~1.9"
 
-      - name: Deploy Infrastructure
+      - name: Write backend config
         run: |
-          az deployment sub create \
-            --location centralindia \
-            --template-file infrastructure/main.bicep \
-            --parameters infrastructure/modules/parameters/${{ needs.determine-environment.outputs.environment }}.parameters.json \
-            --name "fraud-infra-$(date +%Y%m%d%H%M%S)"
+          cat > backend-${{ needs.determine-environment.outputs.environment }}.conf <<EOF
+          resource_group_name  = "${{ secrets.TFSTATE_RESOURCE_GROUP }}"
+          storage_account_name = "${{ secrets.TFSTATE_STORAGE_ACCOUNT }}"
+          container_name        = "tfstate"
+          key                   = "fraud-detection-${{ needs.determine-environment.outputs.environment }}.tfstate"
+          EOF
 
-      - name: Verify Deployment
+      - name: Terraform Init
         run: |
-          ENV=${{ needs.determine-environment.outputs.environment }}
-          echo "Verifying resources in rg-fraud-detection-${ENV}..."
-          az resource list \
-            --resource-group "rg-fraud-detection-${ENV}" \
-            --output table
+          terraform init -input=false \
+            -backend-config="backend-${{ needs.determine-environment.outputs.environment }}.conf"
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ needs.determine-environment.outputs.environment }}
+          path: infrastructure
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: Show Outputs
+        run: terraform output
 ```
+
+Required GitHub Secrets: `AZURE_SUBSCRIPTION_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` (Terraform auth via `ARM_*` env vars — see §0.8.4), `OWNER_EMAIL`, `DEPLOYER_OBJECT_ID`, `SQL_ADMIN_PASSWORD`, `DECISION_FUNCTION_PRINCIPAL_ID`, `LOGIC_APP_PRINCIPAL_ID` (the last two default to empty — see §0.10, those two identities aren't provisioned by this Terraform config), plus `TFSTATE_RESOURCE_GROUP`/`TFSTATE_STORAGE_ACCOUNT` (printed by the one-time `infrastructure/bootstrap/` apply).
 
 #### `.github/workflows/data-ci.yml`
 
@@ -1205,9 +1103,11 @@ jobs:
         uses: bridgecrewio/checkov-action@master
         with:
           directory: infrastructure/
-          framework: bicep
+          framework: terraform
           soft_fail: true   # Don't block PR on first run; tighten later
 ```
+
+> Note: the real `.github/workflows/security-scan.yml` has grown into a 4-job pipeline (TruffleHog, Checkov, Bandit, pip-audit) beyond this Phase 0 sketch — see Phase 7's implementation plan for the current, fuller spec.
 
 ### 0.8.3 Repository Configuration Files
 
@@ -1235,7 +1135,7 @@ ml/                @data-science-team
 <!-- What does this PR do? -->
 
 ## Type of Change
-- [ ] Infrastructure (Bicep/Terraform)
+- [ ] Infrastructure (Terraform)
 - [ ] Data pipeline (PySpark/ADF)
 - [ ] ML model/training
 - [ ] CI/CD
@@ -1301,119 +1201,125 @@ ml/                @data-science-team
 
 ---
 
-## 0.10 Main Orchestrator Template
+## 0.10 Main Orchestrator (Terraform Root Module)
 
-#### `infrastructure/main.bicep`
+Unlike the old `main.bicep` (which only ever wired together 5 of 13 modules), the Terraform
+root module wires **all 13** into one graph — Event Hubs, Cosmos DB, Service Bus, Azure SQL,
+App Configuration, RBAC, and Private Endpoints no longer need separate manual
+`az deployment group create` calls per module.
 
-```bicep
-// ============================================================
-// Fraud Detection Platform — Main Infrastructure Orchestrator
-// FREE TRIAL VERSION — no VNet, no private endpoints, no Azure ML
-// ============================================================
-// Deploys: Resource Group → Log Analytics → Key Vault → ADLS Gen2 → Databricks
-// Usage: az deployment sub create --location centralindia \
-//        --template-file main.bicep \
-//        --parameters modules/parameters/dev.parameters.json
+#### `infrastructure/providers.tf`
 
-targetScope = 'subscription'
+```hcl
+terraform {
+  required_version = ">= 1.5"
 
-// --- Parameters ---
-@description('Environment name — dev only for Free Trial')
-@allowed(['dev'])
-param environment string = 'dev'
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+  }
 
-@description('Azure region')
-param location string = 'centralindia'
+  # Partial backend config -- environment-specific values supplied at
+  # `terraform init` time via -backend-config=backend-dev.conf (see
+  # infrastructure/bootstrap/ for the one-time step that creates the state
+  # storage account itself).
+  backend "azurerm" {}
+}
 
-@description('Owner email for tagging')
-param ownerEmail string
-
-@description('Azure AD tenant ID')
-param tenantId string
-
-@description('Object ID of the deployer (for Key Vault admin access)')
-param deployerObjectId string
-
-param projectName string = 'fraud-detection'
-
-// --- Step 1: Resource Group ---
-module rg 'modules/resource-group.bicep' = {
-  name: 'deploy-resource-group'
-  params: {
-    environment: environment
-    location: location
-    ownerEmail: ownerEmail
+provider "azurerm" {
+  features {
+    key_vault {
+      purge_soft_delete_on_destroy    = false
+      recover_soft_deleted_key_vaults = true
+    }
   }
 }
 
-// --- Step 2: Log Analytics ---
-module logAnalytics 'modules/log-analytics.bicep' = {
-  name: 'deploy-log-analytics'
-  scope: resourceGroup(rg.outputs.resourceGroupName)
-  params: {
-    environment: environment
-    location: location
-  }
-}
-
-// --- Step 3: Key Vault ---
-module keyVault 'modules/key-vault.bicep' = {
-  name: 'deploy-keyvault'
-  scope: resourceGroup(rg.outputs.resourceGroupName)
-  params: {
-    environment: environment
-    location: location
-    tenantId: tenantId
-    deployerObjectId: deployerObjectId
-  }
-}
-
-// --- Step 4: ADLS Gen2 (no private endpoint for Free Trial) ---
-module storage 'modules/storage-account.bicep' = {
-  name: 'deploy-storage'
-  scope: resourceGroup(rg.outputs.resourceGroupName)
-  params: {
-    environment: environment
-    location: location
-  }
-}
-
-// --- Step 5: Databricks Workspace (no VNet injection for Free Trial) ---
-module databricks 'modules/databricks-workspace.bicep' = {
-  name: 'deploy-databricks'
-  scope: resourceGroup(rg.outputs.resourceGroupName)
-  params: {
-    environment: environment
-    location: location
-  }
-}
-
-// --- FREE TRIAL: No Azure ML Workspace ---
-// Azure ML is deferred to Phase 3. Using MLflow on Databricks instead.
-// When ready, uncomment and add azureml-workspace.bicep module.
-
-// --- Outputs ---
-output resourceGroupName string = rg.outputs.resourceGroupName
-output storageAccountName string = storage.outputs.storageAccountName
-output keyVaultName string = keyVault.outputs.keyVaultName
-output databricksWorkspaceUrl string = databricks.outputs.workspaceUrl
-output logAnalyticsName string = logAnalytics.outputs.logAnalyticsName
+data "azurerm_client_config" "current" {}
 ```
 
-#### `infrastructure/modules/parameters/dev.parameters.json`
+#### `infrastructure/main.tf` (excerpt — first 5 modules, matching what the old `main.bicep` covered)
 
-```json
-{
-  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
-  "contentVersion": "1.0.0.0",
-  "parameters": {
-    "environment": { "value": "dev" },
-    "location": { "value": "centralindia" },
-    "ownerEmail": { "value": "your-email@example.com" },
-    "tenantId": { "value": "YOUR-TENANT-ID" },
-    "deployerObjectId": { "value": "YOUR-OBJECT-ID" }
-  }
+```hcl
+module "resource_group" {
+  source = "./modules/resource-group"
+
+  environment  = var.environment
+  location     = var.location
+  project_name = var.project_name
+  owner_email  = var.owner_email
 }
+
+module "log_analytics" {
+  source = "./modules/log-analytics"
+
+  environment         = var.environment
+  location            = var.location
+  resource_group_name = module.resource_group.resource_group_name
+  project_name        = var.project_name
+}
+
+module "key_vault" {
+  source = "./modules/key-vault"
+
+  environment                = var.environment
+  location                   = var.location
+  resource_group_name        = module.resource_group.resource_group_name
+  project_name               = var.project_name
+  tenant_id                  = data.azurerm_client_config.current.tenant_id  # auto-derived, no tenantId param needed
+  deployer_object_id         = var.deployer_object_id
+  log_analytics_workspace_id = module.log_analytics.log_analytics_id
+}
+
+module "storage_account" {
+  source = "./modules/storage-account"
+
+  environment         = var.environment
+  location            = var.location
+  resource_group_name = module.resource_group.resource_group_name
+  project_name        = var.project_name
+}
+
+module "databricks_workspace" {
+  source = "./modules/databricks-workspace"
+
+  environment         = var.environment
+  location            = var.location
+  resource_group_name = module.resource_group.resource_group_name
+  project_name        = var.project_name
+}
+
+# ... eventhubs, cosmos_db, service_bus, azure_sql, app_configuration,
+# diagnostics (for_each over all of the above), rbac_assignments, and
+# private_endpoints modules follow -- see the full infrastructure/main.tf
+# for all 13. Phases 2, 3, 5, and 7 each document their own module in detail.
+```
+
+One param disappears entirely versus Bicep: `tenantId` no longer needs to be supplied by hand — `data.azurerm_client_config.current.tenant_id` reads it straight from the authenticated Azure context.
+
+#### `infrastructure/environments/dev.tfvars`
+
+```hcl
+# Replaces infrastructure/modules/parameters/dev.parameters.json from the Bicep version.
+# Deliberately NOT included here: sql_admin_password (sensitive, no default --
+# supply via TF_VAR_sql_admin_password, never commit a real password).
+
+environment        = "dev"
+location           = "centralindia"
+owner_email        = "your-email@example.com"
+deployer_object_id = "YOUR-OBJECT-ID"
+
+enable_private_endpoints = false
+```
+
+Usage:
+```bash
+cd infrastructure
+terraform init -backend-config=backend-dev.conf   # see infrastructure/bootstrap/ for the one-time backend setup
+terraform plan  -var-file=environments/dev.tfvars
+terraform apply -var-file=environments/dev.tfvars
 ```
 
 ---
@@ -1567,19 +1473,26 @@ fi
 ```
 fraud-detection-platform/
 ├── infrastructure/
-│   ├── main.bicep                         # Main orchestrator (FREE TRIAL: no VNet, no Azure ML)
+│   ├── main.tf                            # Root module — wires all 13 modules together
+│   ├── providers.tf                       # azurerm provider + partial remote backend config
+│   ├── variables.tf / outputs.tf
 │   ├── modules/
-│   │   ├── resource-group.bicep
-│   │   ├── key-vault.bicep                # Key Vault + placeholder secrets
-│   │   ├── storage-account.bicep          # ADLS Gen2 + 8 containers (no private endpoints)
-│   │   ├── databricks-workspace.bicep     # Premium trial, managed VNet (no VNet injection)
-│   │   ├── log-analytics.bicep            # Centralized logging (1 GB/day cap)
-│   │   ├── vnet.bicep                     # ⏸️ KEPT FOR PRODUCTION UPGRADE (not deployed)
-│   │   ├── azureml-workspace.bicep        # ⏸️ KEPT FOR PHASE 3 (not deployed)
-│   │   └── parameters/
-│   │       └── dev.parameters.json        # Only dev for Free Trial
+│   │   ├── resource-group/
+│   │   ├── key-vault/                     # Key Vault + placeholder secrets
+│   │   ├── storage-account/               # ADLS Gen2 + 9 containers (no private endpoints)
+│   │   ├── databricks-workspace/          # Premium trial, managed VNet (no VNet injection)
+│   │   ├── log-analytics/                 # Centralized logging (1 GB/day cap)
+│   │   ├── eventhubs/ cosmos-db/ service-bus/ azure-sql/ app-configuration/
+│   │   ├── rbac-assignments/              # Wired into main.tf (Bicep version never was)
+│   │   ├── private-endpoints/             # enable_private_endpoints = false for Free Trial
+│   │   └── diagnostic-settings/           # Generic module, applied via for_each in main.tf
+│   │       # No vnet/ or azureml-workspace/ module exists yet -- both remain real
+│   │       # gaps for the production upgrade, not "kept but dormant" files.
+│   ├── environments/
+│   │   └── dev.tfvars                     # Only dev for Free Trial
+│   ├── bootstrap/                         # One-time: creates the remote state storage account
 │   ├── scripts/
-│   │   └── smoke_test.sh                  # Automated Phase 0 validation
+│   │   └── smoke_test.sh                  # Automated Phase 0 validation (unchanged — az-cli based, tool-agnostic)
 │   └── README.md
 │
 ├── databricks/
@@ -1612,7 +1525,7 @@ fraud-detection-platform/
 
 | # | Decision | Free Trial Choice | Production Upgrade | Rationale |
 |---|---|---|---|---|
-| 1 | IaC tool | **Bicep** | Same | Azure-native, no state file management |
+| 1 | IaC tool | **Terraform** (migrated from Bicep 2026-08-11) | Same | Chosen for state management, `for_each`/`count` module composition, and to match the maintainer's existing Terraform experience. Trade-off accepted: unlike Bicep's stateless ARM deployment model, Terraform needs a real state backend (see the `bootstrap/` one-time step) and state can drift from reality if resources are changed outside Terraform. |
 | 2 | CI/CD platform | **GitHub Actions** | Same | Free for public repos |
 | 3 | Azure login method | **Client secret** (Free Trial limitation) | Switch to **OIDC federated credentials** | OIDC may not work with Free Trial SPs; client secret is simpler |
 | 4 | Key Vault access model | **Azure RBAC** | Same | Modern, auditable |
@@ -1652,6 +1565,6 @@ fraud-detection-platform/
 
 | # | Component | Bug | Fix |
 |---|---|---|---|
-| 1 | `infrastructure/modules/storage-account.bicep` | The `containers` list provisioned `raw/bronze/silver/gold/quarantine/checkpoints/feature-store/eventhubs-capture` but not `staging` — even though `data-factory/pipelines/pl_ingest_ieee_cis.json`'s own description says it "ingests IEEE-CIS dataset CSVs from staging/blob landing" and `data-factory/datasets/ds_source_ieee_cis_csv.json` reads from `fileSystem: "staging"`. The Copy activities would fail at runtime with "filesystem not found". | Added `staging` to the provisioned container list. |
+| 1 | `infrastructure/modules/storage-account.bicep` (now `infrastructure/modules/storage-account/main.tf` after the Terraform migration — the fix carried forward) | The `containers` list provisioned `raw/bronze/silver/gold/quarantine/checkpoints/feature-store/eventhubs-capture` but not `staging` — even though `data-factory/pipelines/pl_ingest_ieee_cis.json`'s own description says it "ingests IEEE-CIS dataset CSVs from staging/blob landing" and `data-factory/datasets/ds_source_ieee_cis_csv.json` reads from `fileSystem: "staging"`. The Copy activities would fail at runtime with "filesystem not found". | Added `staging` to the provisioned container list. |
 | 2 | `infrastructure/scripts/smoke_test.sh` | Only checked 6 of the 8 (now 9) provisioned containers — missing `feature-store` and `eventhubs-capture` (and now `staging`). A smoke test that doesn't check every provisioned container can pass while part of the landing zone is silently missing. | Added checks for `feature-store`, `eventhubs-capture`, and `staging`. |
 

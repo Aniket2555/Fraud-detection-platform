@@ -41,14 +41,14 @@ A production-grade, end-to-end real-time credit card fraud detection platform bu
 
 ## Phase Implementation Status (100% Complete 🎉)
 
-- [x] **Phase 0:** IaC & Environment Foundation (Bicep IaC, Key Vault, ADLS Gen2, Databricks Workspace, Unity Catalog, CI/CD, Budget Controls)
+- [x] **Phase 0:** IaC & Environment Foundation (Terraform IaC, Key Vault, ADLS Gen2, Databricks Workspace, Unity Catalog, CI/CD, Budget Controls)
 - [x] **Phase 1:** Batch Ingestion & Baseline Model (ADF Ingestion, Auto Loader, PyDeequ Quality Gates, Medallion Bronze/Silver/Gold, XGBoost Baseline)
 - [x] **Phase 2:** Real-Time Streaming Ingestion (Event Hubs Standard, Avro Capture, Python Stream Producer, Structured Streaming Bronze/Silver MERGE)
 - [x] **Phase 3:** Feature Engineering & Feature Store (43 Features, 6 Families, Haversine >900 km/h Impossible Travel, Cosmos DB Gremlin + GraphFrames, PIT Join Engine)
 - [x] **Phase 4:** Hybrid Model & Real-Time Serving (XGBoost + PyTorch Deep Autoencoder + Isolation Forest, Isotonic Calibrators, Stacking Meta-Learner, MLflow PyFunc, SHAP Explainer, <100ms `score.py`, 3-Tier Circuit Breaker)
 - [x] **Phase 5:** Decision Engine & Case Workflow (Azure App Config 60s TTL Cache, Service Bus 3 Subscriptions, Azure SQL Serverless 5 Tables, Fast-Path Function <15ms, Compliance Audit Logger, Timer DLQ Monitor, Logic Apps Step-Up)
 - [x] **Phase 6:** MLOps Loop (Continuous Retraining, PSI/KS/JSD Multi-Metric Drift, Concept Drift, 4-Gate Champion-Challenger + McNemar's Test, Shadow Scoring, Rollback Sentinel)
-- [x] **Phase 7:** Governance, Security & Hardening (Unity Catalog Column Masking, SHA-256 PII Salting, Private Endpoints Bicep, 4-Scan Security CI/CD, 5-Scenario Chaos Suite, 17-Item Sign-Off)
+- [x] **Phase 7:** Governance, Security & Hardening (Unity Catalog Column Masking, SHA-256 PII Salting, Private Endpoints Terraform Module, 4-Scan Security CI/CD, 5-Scenario Chaos Suite, 17-Item Sign-Off)
 
 ---
 
@@ -56,9 +56,11 @@ A production-grade, end-to-end real-time credit card fraud detection platform bu
 
 ```
 .
-├── infrastructure/               # Bicep IaC modules & deployment scripts
-│   ├── main.bicep                # Sub-scope deployment orchestrator
-│   └── modules/                  # RG, Log Analytics, Key Vault, Storage, Databricks, Event Hubs, Cosmos DB, Service Bus, Azure SQL, App Config, RBAC, Private Endpoints, Diagnostic Settings
+├── infrastructure/               # Terraform IaC modules & deployment scripts
+│   ├── main.tf                   # Root module — wires every module together into one apply
+│   ├── modules/                  # RG, Log Analytics, Key Vault, Storage, Databricks, Event Hubs, Cosmos DB, Service Bus, Azure SQL, App Config, RBAC, Private Endpoints, Diagnostic Settings
+│   ├── environments/             # Per-environment .tfvars (dev.tfvars)
+│   └── bootstrap/                # One-time config that creates the remote state storage account
 ├── data-factory/                 # ADF pipelines, datasets, linked services, & triggers
 ├── database/                     # Azure SQL migrations (V001-V005) & stored procedures (sp_upsert_fraud_case, sp_update_case_status)
 ├── databricks/                   # PySpark Medallion notebooks, quality gates, feature modules, streaming MERGE, GraphFrames, governance, & MLOps jobs
@@ -88,13 +90,21 @@ A production-grade, end-to-end real-time credit card fraud detection platform bu
 ## Getting Started
 
 ### Quick Start Infrastructure Deployment
-1. Update parameters in `infrastructure/modules/parameters/dev.parameters.json`.
-2. Run Bicep Deployment:
+1. **One-time only** — bootstrap the remote state storage account (Terraform can't create the storage it stores its own state in):
    ```bash
-   az deployment sub create \
-     --location centralindia \
-     --template-file infrastructure/main.bicep \
-     --parameters infrastructure/modules/parameters/dev.parameters.json
+   cd infrastructure/bootstrap
+   terraform init
+   terraform apply -var="environment=dev"
+   # copy the printed backend_config_snippet output into ../backend-dev.conf
+   # (see infrastructure/backend-dev.conf.example for the format)
+   ```
+2. Fill in `infrastructure/environments/dev.tfvars` (owner email, deployer object ID), then deploy:
+   ```bash
+   cd infrastructure
+   terraform init -backend-config=backend-dev.conf
+   export TF_VAR_sql_admin_password="..."   # never commit this value
+   terraform plan  -var-file=environments/dev.tfvars
+   terraform apply -var-file=environments/dev.tfvars
    ```
 3. Run Platform Verification Script:
    ```bash

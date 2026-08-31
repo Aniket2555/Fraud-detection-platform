@@ -559,7 +559,7 @@ Promote to full traffic (or roll back automatically on regression)
 
 - **Batch orchestration:** Azure Data Factory (IEEE-CIS ingestion, scheduled feature backfills, retraining pipeline triggers, and the Azure SQL → Silver reference-data sync) or Databricks Workflows for Spark-native jobs — pick one as the primary orchestrator to avoid split-brain scheduling; Databricks Workflows is the simpler choice if Databricks is already the compute backbone.
 - **Business-process orchestration:** kept deliberately separate from the above — **Azure Logic Apps** owns the step-up/manual-review workflow (Section 8.3). Data pipeline orchestration changes go through the usual CI/CD; the human-facing workflow is meant to be editable by fraud-ops/compliance directly, so mixing it into the data orchestrator would undo that benefit.
-- **IaC:** Bicep or Terraform for all Azure resources (Event Hubs namespace, ADLS Gen2, Databricks workspace, Azure ML workspace + feature store, Managed Redis, AKS if used, Key Vault, Purview) — environment parity between dev/staging/prod, no click-ops.
+- **IaC:** Terraform for all Azure resources (Event Hubs namespace, ADLS Gen2, Databricks workspace, Azure ML workspace + feature store, Managed Redis, AKS if used, Key Vault, Purview) — environment parity between dev/staging/prod, no click-ops.
 - **CI/CD:** Azure DevOps or GitHub Actions for both data pipeline code (Spark jobs, dbt-style tests) and ML code (training pipelines, scoring script, endpoint deployment) — separate pipelines, shared artifact versioning.
 
 ---
@@ -587,7 +587,7 @@ Promote to full traffic (or roll back automatically on regression)
 | BI / reporting | Azure Synapse (serverless SQL) + Power BI |
 | Secrets | Azure Key Vault |
 | Identity | Microsoft Entra ID |
-| IaC | Bicep / Terraform |
+| IaC | Terraform |
 | CI/CD | Azure DevOps / GitHub Actions |
 
 ---
@@ -596,7 +596,7 @@ Promote to full traffic (or roll back automatically on regression)
 
 Given the scope, building this in one shot isn't realistic — a sensible incremental sequence:
 
-0. **Environment & IaC foundation:** Provision the core Azure resources (Resource Group, ADLS Gen2, Databricks workspace, Azure ML workspace, Key Vault, VNet with private endpoints) via Bicep/Terraform and stand up the CI/CD pipeline skeleton (Azure DevOps or GitHub Actions). This avoids click-ops debt that compounds with every subsequent phase and ensures dev/staging/prod parity from day one. Do not proceed to Phase 1 without this in place.
+0. **Environment & IaC foundation:** Provision the core Azure resources (Resource Group, ADLS Gen2, Databricks workspace, Azure ML workspace, Key Vault, VNet with private endpoints) via Terraform and stand up the CI/CD pipeline skeleton (Azure DevOps or GitHub Actions). This avoids click-ops debt that compounds with every subsequent phase and ensures dev/staging/prod parity from day one. Do not proceed to Phase 1 without this in place.
 1. **Batch foundation:** ADLS Gen2 + Databricks, load IEEE-CIS, build Bronze/Silver/Gold for the historical set only. Train a first XGBoost baseline off Gold. No streaming yet.
 2. **Streaming path:** stand up Event Hubs, write the Credit Card Transactions replay producer, get raw events flowing into Bronze via Structured Streaming. Validate exactly-once + schema evolution. **Measure actual late-arrival distribution here** to calibrate the watermark before feature engineering.
 3. **Feature engineering:** implement windowed/stateful velocity + geo features on the stream; stand up the Azure ML managed feature store with offline+online materialization for one feature set first (prove the point-in-time join works) before adding all feature families. Add the Cosmos DB entity graph sink for real-time local graph queries.
