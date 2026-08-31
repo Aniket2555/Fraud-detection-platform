@@ -23,31 +23,7 @@
 
 ## Phase 4 Internal Dependency Graph
 
-```mermaid
-graph TD
-    A["4.1 Labeled Data & PIT\nFeature Retrieval"] --> B["4.2 Synthetic Fraud\nGenerator (CTGAN/SMOTE)"]
-    A --> C["4.3 Supervised Model\n(XGBoost / LightGBM)"]
-    B --> C
-    A --> D["4.4 Unsupervised\nPyTorch Autoencoder"]
-    A --> E["4.5 Unsupervised\nIsolation Forest"]
-    C --> F["4.6 Score Calibration\n(Platt / Isotonic)"]
-    D --> F
-    E --> F
-    F --> G["4.7 Stacking\nMeta-Learner"]
-    G --> H["4.8 MLflow Ensemble\nArtifact Packaging"]
-    C --> I["4.9 SHAP Explainability\nEngine"]
-    H --> J["4.10 Training Pipeline\nOrchestration"]
-    J --> K["4.11 Serving & Scoring\nScript (score.py)"]
-    I --> K
-    K --> L["4.12 Fallback & Circuit\nBreaker Logic"]
-    L --> M["4.13 Endpoint Deployment\nSpec (YAML)"]
-    M --> N["4.14 Validation &\nLatency Benchmarks"]
-
-    style H fill:#e8f5e9,stroke:#4caf50
-    style J fill:#e3f2fd,stroke:#1976d2
-    style K fill:#fff3e0,stroke:#f57c00
-    style L fill:#ffe0b2,stroke:#ff9800
-```
+![alt text](image-4.png)
 
 ---
 

@@ -64,14 +64,16 @@ def train_xgboost_supervised(
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
             "random_state": 42,
             "n_jobs": -1,
-            "use_label_encoder": False,
+            # In the installed XGBoost (3.x), early_stopping_rounds is a
+            # constructor parameter, not a fit() kwarg -- the reverse of
+            # older XGBoost 1.x behavior.
+            "early_stopping_rounds": 50,
         }
 
         model = xgb.XGBClassifier(**params)
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            early_stopping_rounds=50,   # XGBoost 2.x: pass in fit(), not constructor
             verbose=False,
         )
 
@@ -109,14 +111,13 @@ def train_xgboost_supervised(
         "scale_pos_weight": scale_pos_weight,
         "random_state": 42,
         "n_jobs": -1,
-        "use_label_encoder": False,
+        "early_stopping_rounds": 50,
     })
 
     final_model = xgb.XGBClassifier(**best_params)
     final_model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
-        early_stopping_rounds=50,
         verbose=False,
     )
 

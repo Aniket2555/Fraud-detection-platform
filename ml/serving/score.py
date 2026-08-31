@@ -17,8 +17,8 @@ import logging
 import numpy as np
 import mlflow.pyfunc
 
-from shap_explainability import FraudExplainer
-from circuit_breaker import CircuitBreaker
+from fraud_detection.ml.serving.shap_explainability import FraudExplainer
+from fraud_detection.ml.serving.circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger("fraud_scoring")
 

@@ -6,7 +6,9 @@ Uses Phase 3's multi_entity_pit_join for temporal correctness.
 import logging
 
 from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
 from pyspark.sql.functions import col, datediff, current_date
+from pyspark.sql.window import Window
 from fraud_detection.features.point_in_time_join import multi_entity_pit_join
 
 logger = logging.getLogger("data_preparation")
@@ -25,8 +27,14 @@ def prepare_training_dataset(spark) -> tuple:
     Retrieves labeled transactions with all feature families joined via PIT.
     Returns (train_df, val_df, test_df) as PySpark DataFrames.
     """
-    labeled_df = spark.table("fraud_detection_dev.gold.reconciled_labeled_transactions").filter(
-        col("is_fraud_reconciled").isNotNull()
+    # gold.reconciled_labeled_transactions (a post-hoc analyst-reviewed label
+    # table) is never actually produced anywhere in this pipeline -- the
+    # event schema's own is_fraud is the only label available, so it's used
+    # directly here instead.
+    labeled_df = (
+        spark.table("fraud_detection_dev.silver.streaming_transactions")
+        .withColumnRenamed("is_fraud", "is_fraud_reconciled")
+        .filter(col("is_fraud_reconciled").isNotNull())
     )
 
     card_velocity = spark.table("fraud_detection_dev.gold.feature_card_velocity")
@@ -64,8 +72,22 @@ def prepare_training_dataset(spark) -> tuple:
     ]
     enriched_df = multi_entity_pit_join(labeled_df, feature_specs)
 
-    train_df = enriched_df.filter(col("event_month") <= 4)
-    val_df = enriched_df.filter(col("event_month") == 5)
-    test_df = enriched_df.filter(col("event_month") == 6)
+    # event_month-based splitting assumed a multi-month dataset (e.g. IEEE-CIS's
+    # 6-month span); this pipeline's actual data source is a compressed-timeframe
+    # streaming replay (minutes to hours, not months), so a fixed 70/15/15
+    # chronological split on event_time_ts is used instead.
+    row_number_col = "_pit_split_row_number"
+    ordered = enriched_df.withColumn(
+        row_number_col, F.row_number().over(Window.orderBy("event_time_ts"))
+    )
+    total = ordered.count()
+    train_end = int(total * 0.70)
+    val_end = int(total * 0.85)
+
+    train_df = ordered.filter(col(row_number_col) <= train_end).drop(row_number_col)
+    val_df = ordered.filter(
+        (col(row_number_col) > train_end) & (col(row_number_col) <= val_end)
+    ).drop(row_number_col)
+    test_df = ordered.filter(col(row_number_col) > val_end).drop(row_number_col)
 
     return train_df, val_df, test_df
