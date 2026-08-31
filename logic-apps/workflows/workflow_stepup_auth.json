@@ -44,7 +44,7 @@
                     "connection": { "name": "@parameters('$connections')['sql']['connectionId']" }
                 },
                 "method": "post",
-                "path": "/v2/datasets/@{encodeURIComponent('sql-fraud-dev')},@{encodeURIComponent('sqldb-fraud-cases-dev')}/procedures/@{encodeURIComponent('sp_upsert_fraud_case')}",
+                "path": "/v2/datasets/@{encodeURIComponent('sql-fraud-dev.database.windows.net')},@{encodeURIComponent('sqldb-fraud-cases-dev')}/procedures/@{encodeURIComponent('sp_upsert_fraud_case')}",
                 "body": {
                     "transaction_id": "@body('Parse_Message_JSON')?['transaction_id']",
                     "customer_id": "@body('Parse_Message_JSON')?['customer_id']",
@@ -74,7 +74,7 @@
                     "connection": { "name": "@parameters('$connections')['sql']['connectionId']" }
                 },
                 "method": "post",
-                "path": "/v2/datasets/@{encodeURIComponent('sql-fraud-dev')},@{encodeURIComponent('sqldb-fraud-cases-dev')}/procedures/@{encodeURIComponent('sp_update_case_status')}",
+                "path": "/v2/datasets/@{encodeURIComponent('sql-fraud-dev.database.windows.net')},@{encodeURIComponent('sqldb-fraud-cases-dev')}/procedures/@{encodeURIComponent('sp_update_case_status')}",
                 "body": {
                     "case_id": "@body('Upsert_Case_Record')?['ResultSets']?['Table1'][0]?['case_id']",
                     "new_status": "ESCALATED",

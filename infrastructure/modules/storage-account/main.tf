@@ -33,7 +33,7 @@ resource "azurerm_storage_account" "this" {
 
   sas_policy {
     expiration_period = "00.01:00:00" # 1 day -- free to set, bounds SAS token lifetime
-    expiration_action  = "Log"
+    expiration_action = "Log"
   }
 
   tags = {

@@ -80,14 +80,14 @@ resource "azurerm_storage_account" "tfstate" {
     versioning_enabled = true # Recover a previous state version if something goes wrong
     delete_retention_policy {
       days = 30 # Recover the state file itself if accidentally deleted -- this is the one
-                # storage account in the whole platform where that protection is unconditionally
-                # worth it, Free Trial or not.
+      # storage account in the whole platform where that protection is unconditionally
+      # worth it, Free Trial or not.
     }
   }
 
   sas_policy {
     expiration_period = "00.01:00:00"
-    expiration_action  = "Log"
+    expiration_action = "Log"
   }
 
   tags = {

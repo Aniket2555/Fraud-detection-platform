@@ -6,7 +6,7 @@ resource "azurerm_servicebus_namespace" "this" {
   sku                 = "Standard"
 
   public_network_access_enabled = true # Free Trial: no private endpoint
-  minimum_tls_version            = "1.2"
+  minimum_tls_version           = "1.2"
   # local_auth_enabled stays at its default (true) -- decision_engine/audit_logger/
   # dlq_monitor and the DLQ replay tooling all still authenticate via SAS
   # connection strings (see docs/execution-log/07-decision-engine.md); only the

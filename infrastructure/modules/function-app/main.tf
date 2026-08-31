@@ -10,8 +10,8 @@ resource "random_string" "func_storage_suffix" {
 
 resource "azurerm_storage_account" "functions" {
   name                     = "stfuncfraud${var.environment}${random_string.func_storage_suffix.result}"
-  resource_group_name     = var.resource_group_name
-  location                = var.location
+  resource_group_name      = var.resource_group_name
+  location                 = var.location
   account_tier             = "Standard"
   account_replication_type = "LRS"
 
@@ -32,7 +32,7 @@ resource "azurerm_storage_account" "functions" {
 
   sas_policy {
     expiration_period = "00.01:00:00"
-    expiration_action  = "Log"
+    expiration_action = "Log"
   }
 
   tags = {
@@ -79,9 +79,9 @@ resource "azurerm_linux_function_app" "decision_engine" {
   }
 
   app_settings = merge(local.common_app_settings, {
-    SERVICE_BUS_CONN_STR    = var.service_bus_send_connection_string
-    SERVICE_BUS_TOPIC_NAME  = var.service_bus_topic_name
-    APP_CONFIG_CONN_STR     = var.app_config_read_connection_string
+    SERVICE_BUS_CONN_STR   = var.service_bus_send_connection_string
+    SERVICE_BUS_TOPIC_NAME = var.service_bus_topic_name
+    APP_CONFIG_CONN_STR    = var.app_config_read_connection_string
   })
 
   # WEBSITE_RUN_FROM_PACKAGE / SCM_DO_BUILD_DURING_DEPLOYMENT / ENABLE_ORYX_BUILD

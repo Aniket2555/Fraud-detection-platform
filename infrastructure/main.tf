@@ -131,6 +131,24 @@ module "function_app" {
   data_lake_storage_account_id         = module.storage_account.storage_account_id
 }
 
+# --- Phase 5: the 2 Logic App workflows (Case Management, Step-Up Auth) that
+# consume from the Service Bus fan-out subscriptions and write case records
+# to Azure SQL. See infrastructure/modules/logic-apps/main.tf for why the
+# API connections use connection-string auth rather than managed identity.
+module "logic_apps" {
+  source = "./modules/logic-apps"
+
+  environment                          = var.environment
+  location                             = var.location
+  resource_group_name                  = module.resource_group.resource_group_name
+  project_name                         = var.project_name
+  service_bus_listen_connection_string = module.service_bus.listen_connection_string
+  sql_server_fqdn                      = module.azure_sql.sql_server_fqdn
+  sql_database_name                    = module.azure_sql.sql_database_name
+  sql_admin_login                      = var.sql_admin_login
+  sql_admin_password                   = var.sql_admin_password
+}
+
 # --- Diagnostic settings: every major resource sends logs/metrics to Log
 # Analytics. The Bicep version only ever wired this for Key Vault (hand-
 # rolled inline) despite Phase 0's own spec claiming every resource did --
