@@ -23,6 +23,7 @@ commands and step-by-step manual instructions.
 | [07-decision-engine.md](07-decision-engine.md) | Phase 5: Service Bus/SQL/App Config deployment, Azure Functions, a real audit-logger bug found and fixed, DLQ replay |
 | [08-mlops-loop.md](08-mlops-loop.md) | Phase 6: drift monitoring, retraining, Champion/Challenger gates + promotion, shadow scoring, a real rollback |
 | [09-governance-security.md](09-governance-security.md) | Phase 7: Unity Catalog masking, PII hashing, RBAC, 4-scan security pipeline, chaos tests, platform verification, a real Key Vault/SQL password rotation |
+| [10-followup-fixes.md](10-followup-fixes.md) | Follow-up: Logic Apps deployed for real, chaos test_03 latency bug fixed at the root cause, UC masking re-enabled via a view |
 
 ## Environment quick-reference
 
