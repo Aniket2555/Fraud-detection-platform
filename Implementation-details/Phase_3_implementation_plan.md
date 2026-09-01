@@ -19,6 +19,8 @@
 
 **Duration:** 3–4 weeks
 
+> **Companion doc:** For the actual commands run, real bugs hit, and decisions made while building this phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md) (§ "Phase 3 — Feature Engineering, GraphFrames, Cosmos DB Graph").
+
 ---
 
 ## Phase 3 Internal Dependency Graph
@@ -1333,10 +1335,14 @@ fraud-detection-platform/
 │   └── jobs/
 │       └── feature_engineering_job.json                 # [NEW] 5-task Databricks Workflow
 │
-└── docs/
-    ├── execution-log/
-    │   └── 05-feature-engineering.md                    # [NEW] Real deployment log: feature store, GraphFrames, Cosmos DB
-    └── feature_store_catalog.md                         # [NEW] Full feature documentation (43 features)
+├── docs/
+│   ├── execution-log/
+│   │   └── 05-feature-engineering.md                    # [NEW] Real deployment log: feature store, GraphFrames, Cosmos DB
+│   └── feature_store_catalog.md                         # [NEW] Full feature documentation (43 features)
+│
+└── Implementation-details/                 # Planning & walkthrough docs (all phases, not phase-scoped)
+    ├── Phase_0_implementation_plan.md … Phase_7_implementation_plan.md
+    └── Step_By_Step_Build_Walkthrough.md   # [NEW] Decisions/commands/bugs walkthrough, all phases
 ```
 
 ---

@@ -21,6 +21,8 @@
 
 **Duration:** 2–3 weeks
 
+> **Companion doc:** For the actual commands run, real bugs hit, and decisions made while building this phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md) (§ "Phase 5 — Decision Engine, Case Management, Compliance Audit").
+
 ---
 
 ## Phase 5 Internal Dependency Graph
@@ -987,11 +989,15 @@ fraud-detection-platform/
 ├── scripts/
 │   └── dlq_replay_handler.py                  # [NEW] Manual DLQ replay for resolved issues
 │
-└── docs/
-    ├── execution-log/
-    │   ├── 07-decision-engine.md               # [NEW] Real deployment log: Service Bus/SQL/App Config, Functions, audit-logger bug
-    │   └── 10-followup-fixes.md                # [NEW] Follow-up: Logic Apps (this phase's workflows) deployed for real
-    └── case_management_workflow.md            # [NEW] Analyst operational runbook + API contract
+├── docs/
+│   ├── execution-log/
+│   │   ├── 07-decision-engine.md               # [NEW] Real deployment log: Service Bus/SQL/App Config, Functions, audit-logger bug
+│   │   └── 10-followup-fixes.md                # [NEW] Follow-up: Logic Apps (this phase's workflows) deployed for real
+│   └── case_management_workflow.md            # [NEW] Analyst operational runbook + API contract
+│
+└── Implementation-details/                 # Planning & walkthrough docs (all phases, not phase-scoped)
+    ├── Phase_0_implementation_plan.md … Phase_7_implementation_plan.md
+    └── Step_By_Step_Build_Walkthrough.md   # [NEW] Decisions/commands/bugs walkthrough, all phases
 ```
 
 ---

@@ -19,6 +19,8 @@
 
 **Duration:** 3–4 weeks
 
+> **Companion doc:** For the actual commands run, real bugs hit, and decisions made while building this phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md) (§ "Phase 4 — Hybrid Ensemble & Serving").
+
 ---
 
 ## Phase 4 Internal Dependency Graph
@@ -1155,10 +1157,14 @@ fraud-detection-platform/
 │       ├── test_calibration_bounds.py     # [NEW] Asserts all calibrated scores in [0, 1]
 │       └── test_latency_benchmark.py      # [NEW] Benchmarks scoring path SLA (<100ms)
 │
-└── docs/
-    ├── execution-log/
-    │   └── 06-model-ensemble.md           # [NEW] Real deployment log: hybrid ensemble training, scoring, circuit breaker
-    └── model_card_hybrid_v1.md            # [NEW] Model Card & Audit documentation
+├── docs/
+│   ├── execution-log/
+│   │   └── 06-model-ensemble.md           # [NEW] Real deployment log: hybrid ensemble training, scoring, circuit breaker
+│   └── model_card_hybrid_v1.md            # [NEW] Model Card & Audit documentation
+│
+└── Implementation-details/                 # Planning & walkthrough docs (all phases, not phase-scoped)
+    ├── Phase_0_implementation_plan.md … Phase_7_implementation_plan.md
+    └── Step_By_Step_Build_Walkthrough.md   # [NEW] Decisions/commands/bugs walkthrough, all phases
 ```
 
 ---

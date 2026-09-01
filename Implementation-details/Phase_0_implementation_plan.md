@@ -23,6 +23,8 @@
 
 **Duration:** 1–2 weeks
 
+> **Companion doc:** For the actual commands run, real bugs hit, and decisions made while building this phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md) (§ "Phase 0 — Environment & Infrastructure Foundation").
+
 ---
 
 ## Phase 0 Internal Dependency Graph
@@ -1513,15 +1515,19 @@ fraud-detection-platform/
 │
 ├── .gitignore
 ├── README.md
-└── docs/
-    ├── end_to_end_guide.md                 # [NEW] Full platform walkthrough, all phases
-    ├── execution-log/
-    │   ├── 00-overview.md                  # [NEW] Index — resource names, links, full bug list
-    │   ├── 01-local-environment.md         # [NEW] Real deployment log: local dev environment fixes
-    │   └── 02-infrastructure.md            # [NEW] Real deployment log: Terraform apply, CI secrets
-    └── phase0/
-        ├── free_trial_budget_guide.md      # Daily cost tracking instructions
-        └── upgrade_to_production.md        # What to change when upgrading
+├── docs/
+│   ├── end_to_end_guide.md                 # [NEW] Full platform walkthrough, all phases
+│   ├── execution-log/
+│   │   ├── 00-overview.md                  # [NEW] Index — resource names, links, full bug list
+│   │   ├── 01-local-environment.md         # [NEW] Real deployment log: local dev environment fixes
+│   │   └── 02-infrastructure.md            # [NEW] Real deployment log: Terraform apply, CI secrets
+│   └── phase0/
+│       ├── free_trial_budget_guide.md      # Daily cost tracking instructions
+│       └── upgrade_to_production.md        # What to change when upgrading
+│
+└── Implementation-details/                 # Planning & walkthrough docs (all phases, not phase-scoped)
+    ├── Phase_0_implementation_plan.md … Phase_7_implementation_plan.md
+    └── Step_By_Step_Build_Walkthrough.md   # [NEW] Decisions/commands/bugs walkthrough, all phases
 ```
 
 ---

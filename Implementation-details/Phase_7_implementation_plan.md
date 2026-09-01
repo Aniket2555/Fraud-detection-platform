@@ -21,6 +21,8 @@
 
 **Duration:** 2 weeks
 
+> **Companion doc:** For the actual commands run, real bugs hit, and decisions made while building this phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md) (§ "Phase 7 — Governance, Security & Hardening", plus "Follow-up Session — Closing 3 Previously-Documented Gaps").
+
 ---
 
 ## Phase 7 Internal Dependency Graph
@@ -950,12 +952,16 @@ fraud-detection-platform/
 │   ├── rotate_keyvault_secrets.py               # [NEW] Multi-secret rotation with audit logging
 │   └── verify_platform_end_to_end.sh            # [NEW] 8-step platform verification runbook
 │
-└── docs/
-    ├── execution-log/
-    │   ├── 09-governance-security.md            # [NEW] Real deployment log: UC masking, PII hashing, 4-scan CI, chaos, secret rotation
-    │   └── 10-followup-fixes.md                 # [NEW] Follow-up: chaos test_03 latency fix, UC masking re-enabled via view
-    ├── security_architecture.md                 # [NEW] PCI-DSS scope, RBAC, network security documentation
-    └── operational_readiness_signoff.md         # [NEW] 17-item production readiness checklist
+├── docs/
+│   ├── execution-log/
+│   │   ├── 09-governance-security.md            # [NEW] Real deployment log: UC masking, PII hashing, 4-scan CI, chaos, secret rotation
+│   │   └── 10-followup-fixes.md                 # [NEW] Follow-up: chaos test_03 latency fix, UC masking re-enabled via view
+│   ├── security_architecture.md                 # [NEW] PCI-DSS scope, RBAC, network security documentation
+│   └── operational_readiness_signoff.md         # [NEW] 17-item production readiness checklist
+│
+└── Implementation-details/                 # Planning & walkthrough docs (all phases, not phase-scoped)
+    ├── Phase_0_implementation_plan.md … Phase_7_implementation_plan.md
+    └── Step_By_Step_Build_Walkthrough.md   # [NEW] Decisions/commands/bugs walkthrough, all phases
 ```
 
 ---

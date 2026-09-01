@@ -9,6 +9,8 @@
 
 **Duration:** 2–3 weeks
 
+> **Companion doc:** For the actual commands run, real bugs hit, and decisions made while building this phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md) (§ "Phase 1 — Batch Foundation: Bronze/Silver/Gold + Baseline Model").
+
 ---
 
 ## Phase 1 Internal Dependency Graph
@@ -1864,15 +1866,19 @@ fraud-detection-platform/
 │   │   └── test_metrics.py
 │   └── requirements.txt
 │
-└── docs/
-    ├── execution-log/
-    │   └── 03-data-landing.md              # [NEW] Real deployment log: Bronze/Silver/Gold, baseline model
-    └── phase1/
-        ├── dataset_analysis.md
-        └── baseline_model_report.md
-        # column_classification.md and transformation_decisions.md were
-        # in the original plan's file tree but never actually produced —
-        # removed here to match what's really in docs/phase1/.
+├── docs/
+│   ├── execution-log/
+│   │   └── 03-data-landing.md              # [NEW] Real deployment log: Bronze/Silver/Gold, baseline model
+│   └── phase1/
+│       ├── dataset_analysis.md
+│       └── baseline_model_report.md
+│       # column_classification.md and transformation_decisions.md were
+│       # in the original plan's file tree but never actually produced —
+│       # removed here to match what's really in docs/phase1/.
+│
+└── Implementation-details/                 # Planning & walkthrough docs (all phases, not phase-scoped)
+    ├── Phase_0_implementation_plan.md … Phase_7_implementation_plan.md
+    └── Step_By_Step_Build_Walkthrough.md   # [NEW] Decisions/commands/bugs walkthrough, all phases
 ```
 
 ---

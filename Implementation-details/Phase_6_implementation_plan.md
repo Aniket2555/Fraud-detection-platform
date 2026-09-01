@@ -20,6 +20,8 @@
 
 **Duration:** 2–3 weeks
 
+> **Companion doc:** For the actual commands run, real bugs hit, and decisions made while building this phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md) (§ "Phase 6 — MLOps Loop: Drift, Retraining, Champion/Challenger, Rollback").
+
 ---
 
 ## Phase 6 Internal Dependency Graph
@@ -1198,10 +1200,14 @@ fraud-detection-platform/
 ├── scripts/
 │   └── automated_rollback_sentinel.py            # [NEW] Live telemetry rollback with archived version revert
 │
-└── docs/
-    ├── execution-log/
-    │   └── 08-mlops-loop.md                      # [NEW] Real deployment log: drift, retrain, gate, promote, real rollback
-    └── mlops_runbook.md                          # [NEW] MLOps operational runbook (triggers, gates, rollback)
+├── docs/
+│   ├── execution-log/
+│   │   └── 08-mlops-loop.md                      # [NEW] Real deployment log: drift, retrain, gate, promote, real rollback
+│   └── mlops_runbook.md                          # [NEW] MLOps operational runbook (triggers, gates, rollback)
+│
+└── Implementation-details/                 # Planning & walkthrough docs (all phases, not phase-scoped)
+    ├── Phase_0_implementation_plan.md … Phase_7_implementation_plan.md
+    └── Step_By_Step_Build_Walkthrough.md   # [NEW] Decisions/commands/bugs walkthrough, all phases
 ```
 
 ---

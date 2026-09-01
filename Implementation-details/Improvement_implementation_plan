@@ -1,5 +1,8 @@
 # Fraud Detection Pipeline Architecture — Refinement Review
 
+> [!NOTE]
+> This reviews [`fraud_detection_pipeline_architecture.md`](./fraud_detection_pipeline_architecture.md), the original design doc, and predates implementation. For the phase-by-phase plans that incorporated these refinements see `Phase_0_implementation_plan.md` through `Phase_7_implementation_plan.md`; for what was actually built see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md).
+
 Your architecture document is **production-caliber** — it demonstrates deep domain understanding of fraud detection, makes sharp technology choices, and avoids the common traps (random splits, training/serving skew, naïve accuracy metrics). The refinements below are targeted improvements, not a rewrite.
 
 ## Summary of Findings

@@ -1,5 +1,8 @@
 # Real-Time Fraud Detection Platform — Phased Implementation Plan
 
+> [!CAUTION]
+> **Superseded.** This was the original combined 7-phase outline, written before implementation started. Each phase has since been split into its own exhaustive, production-grade plan — `Phase_0_implementation_plan.md` through `Phase_7_implementation_plan.md` — which reflect what was actually built, including a Bicep→Terraform migration this file predates. For what was actually run, the real bugs hit, and the decisions made phase by phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md). This file is kept only for historical reference to the original scope.
+
 > [!IMPORTANT]
 > This plan breaks the entire platform into **7 sequential phases**, each independently demoable. Every component, file, Azure resource, code artifact, and verification step is specified in detail. Phases are ordered to front-load data correctness and infrastructure before the ML work — each phase de-risks everything that follows.
 

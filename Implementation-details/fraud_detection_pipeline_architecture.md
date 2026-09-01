@@ -1,5 +1,8 @@
 # Real-Time Fraud Detection Platform — Azure Data Engineering Architecture
 
+> [!NOTE]
+> This is the original design document — the source of truth for *intended* architecture, not a record of what shipped. For the phase-by-phase implementation plans see `Phase_0_implementation_plan.md` through `Phase_7_implementation_plan.md`; for what was actually run, the real bugs hit, and where implementation diverged from this design, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md). The critique of this document is in [`Improvement_implementation_plan`](./Improvement_implementation_plan).
+
 **Scope:** Production-grade lakehouse + streaming + feature store architecture for a hybrid fraud detection system, built entirely on Azure.
 
 **Data sources:** IEEE-CIS Fraud Detection (historical training), Kaggle Credit Card Transactions (streaming simulation), synthetic fraud generator, hybrid anomaly detection (supervised + unsupervised + graph).

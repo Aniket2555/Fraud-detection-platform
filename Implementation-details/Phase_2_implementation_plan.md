@@ -22,6 +22,8 @@
 
 **Duration:** 2–3 weeks
 
+> **Companion doc:** For the actual commands run, real bugs hit, and decisions made while building this phase, see [`Step_By_Step_Build_Walkthrough.md`](./Step_By_Step_Build_Walkthrough.md) (§ "Phase 2 — Streaming: Event Hubs & Transaction Producer").
+
 ---
 
 ## Phase 2 Internal Dependency Graph
@@ -1554,8 +1556,12 @@ fraud-detection-platform/
 │   └── runbooks/
 │       └── streaming_recovery.md               # [NEW] Recovery runbook for streaming failures
 │
-└── scripts/
-    └── store_eventhub_secrets.sh                # [NEW] Post-deployment secret storage
+├── scripts/
+│   └── store_eventhub_secrets.sh                # [NEW] Post-deployment secret storage
+│
+└── Implementation-details/                 # Planning & walkthrough docs (all phases, not phase-scoped)
+    ├── Phase_0_implementation_plan.md … Phase_7_implementation_plan.md
+    └── Step_By_Step_Build_Walkthrough.md   # [NEW] Decisions/commands/bugs walkthrough, all phases
 ```
 
 ---
