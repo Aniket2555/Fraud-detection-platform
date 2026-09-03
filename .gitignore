@@ -95,6 +95,8 @@ data/
 
 # Jupyter
 .ipynb_checkpoints/
+*.ipynb
+!notebook/ieee_cis_dataset_analysis.ipynb
 
 # Windows
 Thumbs.db
