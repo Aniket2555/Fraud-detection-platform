@@ -130,14 +130,7 @@ df = df.withColumn("event_date", F.col("event_time").cast("date"))
 
 ### 1.2.2 Azure Data Factory Pipeline: `pl_ingest_ieee_cis`
 
-```mermaid
-graph LR
-    A["Source:\nADLS staging/\nor Blob"] --> B["Validation:\nFile exists +\nchecksum match"]
-    B --> C["Copy Activity:\nCSV → raw/ieee-cis/\n(ADLS Gen2)"]
-    C --> D["Metadata Activity:\nLog file sizes,\nrow counts"]
-    D --> E["Success:\nTrigger Databricks\njob (optional)"]
-    B --> F["Failure:\nAlert + abort"]
-```
+![alt text](image-6.png)
 
 **Pipeline design decisions:**
 
