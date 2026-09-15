@@ -104,3 +104,6 @@ desktop.ini
 
 # Logs
 *.log
+
+# Internal implementation planning docs (not for public repo)
+Implementation-details/
